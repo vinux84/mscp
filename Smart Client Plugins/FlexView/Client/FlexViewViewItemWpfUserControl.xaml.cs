@@ -72,6 +72,11 @@ namespace FlexView.Client
         // Save target
         private Item _targetFolder;
 
+        // TEST (federated views): when a view is opened from a child site it is loaded as a copy,
+        // never edited in place. This holds the source view so its slot content (camera assignments,
+        // plugin view items) is carried into the new view when saved into a parent folder.
+        private ViewAndLayoutItem _crossSiteSource;
+
         public FlexViewViewItemWpfUserControl()
         {
             InitializeComponent();
@@ -1129,6 +1134,52 @@ namespace FlexView.Client
             UpdateStatus();
         }
 
+        // TEST (federated views): load a view that lives on a child site as an unsaved copy. We never
+        // edit it in place (the child site is read-only through this master session); instead the
+        // panes are loaded fresh so the next Save prompts for a destination folder on the parent
+        // (master). Reading view.Layout / GetChildren here is the crux of the test - if the child
+        // view's layout and slot content come back through the federated session, the copy is
+        // faithful; the results are logged either way.
+        private void LoadCrossSiteViewAsCopy(ViewAndLayoutItem view)
+        {
+            try
+            {
+                var layout = view.Layout;
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Opening cross-site view '{view.Name}': layout slots={(layout?.Length ?? -1)}");
+
+                if (layout == null || layout.Length == 0)
+                {
+                    MessageDialog.ShowError("Open Failed",
+                        "This view is on another site and its layout could not be read through the current session.",
+                        Window.GetWindow(this));
+                    return;
+                }
+
+                LoadFromSdkLayout(layout);
+                TryReadSlotLabels(view);
+
+                // New, unsaved copy: not edit mode, no in-place target. The source is kept so Save
+                // carries its camera / plugin slot content into the new view on the parent.
+                _crossSiteSource = view;
+                _isEditMode = false;
+                _editingView = null;
+                _editingParent = null;
+                _targetFolder = null;
+                _isDirty = true;
+                saveAsButton.Visibility = Visibility.Collapsed;
+                viewNameLabel.Text = view.Name + " (copy from site)";
+
+                RedrawCanvas();
+                UpdateStatus();
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Cross-site view loaded as copy: panes={_panes.Count}. Use Save to store it in a parent folder.");
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] LoadCrossSiteViewAsCopy failed: {ex}");
+                MessageDialog.ShowError("Open Failed", $"Failed to open the cross-site view:\n{ex.Message}", Window.GetWindow(this));
+            }
+        }
+
         private void TryReadSlotLabels(ViewAndLayoutItem view)
         {
             try
@@ -1227,6 +1278,7 @@ namespace FlexView.Client
             _editingView = null;
             _editingParent = null;
             _targetFolder = null;
+            _crossSiteSource = null;
             _isDirty = false;
             saveAsButton.Visibility = Visibility.Collapsed;
             viewNameLabel.Text = "";
@@ -1247,18 +1299,23 @@ namespace FlexView.Client
 
                 if (!proceed) return;
 
-                var browser = new ViewBrowserWindow(BrowseMode.SelectView);
+                // TEST (federated views): browse views across all sites (master + federated children).
+                var browser = new ViewBrowserWindow(BrowseMode.SelectView, federated: true);
                 browser.Owner = Application.Current.MainWindow;
                 if (browser.ShowDialog() == true && browser.SelectedItem != null)
                 {
                     var view = browser.SelectedItem as ViewAndLayoutItem;
                     if (view == null)
                     {
+                        FlexViewDefinition.Log.Info($"[FlexViewFed] Selected item '{browser.SelectedItem.Name}' is not a ViewAndLayoutItem (kind={browser.SelectedItem.FQID?.Kind}).");
                         MessageDialog.ShowError("Open Failed", "Selected item is not a view layout.", Window.GetWindow(this));
                         return;
                     }
 
-                    LoadViewForEditing(view, browser.SelectedParent);
+                    if (browser.SelectedIsCrossSite)
+                        LoadCrossSiteViewAsCopy(view);
+                    else
+                        LoadViewForEditing(view, browser.SelectedParent);
                 }
             }
             catch (Exception ex)
@@ -1300,12 +1357,18 @@ namespace FlexView.Client
             }
             else
             {
-                var dlg = new SaveViewWindow(null, _targetFolder);
+                // TEST (federated views): a copy opened from a child site carries its source name and
+                // slot content (cameras / plugin view items) into the new view saved on the parent.
+                string defaultName = _crossSiteSource?.Name;
+                List<SlotSnapshot> slotContent = _crossSiteSource != null ? SnapshotSlotContent(_crossSiteSource) : null;
+
+                var dlg = new SaveViewWindow(defaultName, _targetFolder);
                 dlg.Owner = Application.Current.MainWindow;
                 if (dlg.ShowDialog() == true)
                 {
                     _targetFolder = dlg.SelectedFolder;
-                    SaveNewView(dlg.ViewName, dlg.SelectedFolder);
+                    var saved = SaveNewView(dlg.ViewName, dlg.SelectedFolder, slotContent);
+                    if (saved != null) _crossSiteSource = null;
                 }
             }
         }

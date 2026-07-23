@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
 
@@ -12,13 +13,24 @@ namespace FlexView.Client
     public partial class ViewBrowserWindow : Window
     {
         private readonly BrowseMode _mode;
+        // TEST (federated views): when true, the Open tree is populated from every site (master +
+        // federated children) via FederationWalker instead of the master-only client view tree.
+        private readonly bool _federated;
 
         public Item SelectedItem { get; private set; }
         public Item SelectedParent { get; private set; }
 
-        public ViewBrowserWindow(BrowseMode mode)
+        // TEST (federated views): true when the selected view lives on a different site than the
+        // master we are logged into. The caller then loads it as a new copy so it can be saved into
+        // a parent (master) folder rather than written back to the child site.
+        public bool SelectedIsCrossSite { get; private set; }
+
+        public ViewBrowserWindow(BrowseMode mode) : this(mode, false) { }
+
+        public ViewBrowserWindow(BrowseMode mode, bool federated)
         {
             _mode = mode;
+            _federated = federated;
             InitializeComponent();
             headerText.Text = mode == BrowseMode.SelectFolder
                 ? "Select a folder to save the view in"
@@ -28,6 +40,17 @@ namespace FlexView.Client
         }
 
         private void LoadTree()
+        {
+            if (_federated && _mode == BrowseMode.SelectView)
+            {
+                LoadTreeFederated();
+                return;
+            }
+            LoadTreeClassic();
+        }
+
+        // Master-only tree from the client view-group API (original behavior).
+        private void LoadTreeClassic()
         {
             List<Item> groups;
             try
@@ -46,6 +69,62 @@ namespace FlexView.Client
                 var node = CreateTreeNode(group);
                 if (node != null)
                     tree.Items.Add(node);
+            }
+        }
+
+        // TEST (federated views): one non-selectable header node per site, each holding that site's
+        // view roots. On a non-federated system (only the master) this falls back to the classic
+        // flat tree so behavior is unchanged.
+        private void LoadTreeFederated()
+        {
+            List<FederationWalker.SiteViews> siteViews;
+            try { siteViews = FederationWalker.CollectAllSiteViews(); }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] CollectAllSiteViews failed: {ex.Message}");
+                LoadTreeClassic();
+                return;
+            }
+
+            if (siteViews == null || siteViews.Count <= 1)
+            {
+                FlexViewDefinition.Log.Info("[FlexViewFed] Single site (no children) - using classic flat tree.");
+                LoadTreeClassic();
+                return;
+            }
+
+            foreach (var sv in siteViews)
+            {
+                var header = new TreeViewItem
+                {
+                    Header = "\U0001F310 " + sv.Label,
+                    Tag = null,                 // site header is not selectable
+                    IsExpanded = true,
+                    FontWeight = FontWeights.Bold
+                };
+
+                int added = 0;
+                if (sv.ViewRoots != null)
+                {
+                    foreach (var root in sv.ViewRoots)
+                    {
+                        var node = CreateTreeNode(root);
+                        if (node != null) { header.Items.Add(node); added++; }
+                    }
+                }
+
+                if (added == 0)
+                {
+                    header.Items.Add(new TreeViewItem
+                    {
+                        Header = "   (no views reachable)",
+                        Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x94, 0x9E)),
+                        Tag = null,
+                        FontWeight = FontWeights.Normal
+                    });
+                }
+
+                tree.Items.Add(header);
             }
         }
 
@@ -158,6 +237,19 @@ namespace FlexView.Client
             var parentNode = selected.Parent as TreeViewItem;
             if (parentNode != null)
                 SelectedParent = parentNode.Tag as Item;
+
+            // TEST (federated views): flag selections that live on a child site so the caller loads
+            // them as a copy targeted at a parent folder.
+            SelectedIsCrossSite = false;
+            try
+            {
+                var masterSid = EnvironmentManager.Instance.MasterSite?.ServerId?.Id;
+                var selSid = SelectedItem?.FQID?.ServerId?.Id;
+                if (masterSid != null && selSid != null && masterSid != selSid)
+                    SelectedIsCrossSite = true;
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected '{SelectedItem?.Name}' kind={SelectedItem?.FQID?.Kind} crossSite={SelectedIsCrossSite}");
+            }
+            catch { }
 
             DialogResult = true;
         }
