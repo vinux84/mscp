@@ -25,6 +25,10 @@ namespace FlexView.Client
         // a parent (master) folder rather than written back to the child site.
         public bool SelectedIsCrossSite { get; private set; }
 
+        // TEST (federated views): set when the selection is a child-site view read from the
+        // Management Server config (rather than a master client Item). Carries the rebuilt FQID.
+        internal FederationWalker.FedView SelectedFedView { get; private set; }
+
         public ViewBrowserWindow(BrowseMode mode) : this(mode, false) { }
 
         public ViewBrowserWindow(BrowseMode mode, bool federated)
@@ -93,6 +97,8 @@ namespace FlexView.Client
                 return;
             }
 
+            var dim = new SolidColorBrush(Color.FromRgb(0x8B, 0x94, 0x9E));
+
             foreach (var sv in siteViews)
             {
                 var header = new TreeViewItem
@@ -104,12 +110,34 @@ namespace FlexView.Client
                 };
 
                 int added = 0;
-                if (sv.ViewRoots != null)
+
+                if (sv.IsMaster)
                 {
-                    foreach (var root in sv.ViewRoots)
+                    // Master: real client Items - fully selectable/openable, same as today.
+                    foreach (var root in sv.ClientViewRoots)
                     {
                         var node = CreateTreeNode(root);
                         if (node != null) { header.Items.Add(node); added++; }
+                    }
+                }
+                else
+                {
+                    // Child site: views read from the Management Server config. Each carries a rebuilt
+                    // FQID so it can be resolved to a ViewAndLayoutItem and opened as a copy, then
+                    // saved into a parent folder. Views whose FQID could not be rebuilt are shown but
+                    // not selectable.
+                    foreach (var fv in sv.FedViews)
+                    {
+                        bool openable = fv.Fqid != null;
+                        header.Items.Add(new TreeViewItem
+                        {
+                            Header = $"\U0001F4CB {fv.GroupPath} / {fv.Name}" + (openable ? "" : "   [not resolvable]"),
+                            Foreground = openable ? Brushes.White : dim,
+                            Tag = openable ? fv : null,     // FedView tag = selectable child view
+                            FontWeight = FontWeights.Normal,
+                            IsExpanded = false
+                        });
+                        added++;
                     }
                 }
 
@@ -118,7 +146,7 @@ namespace FlexView.Client
                     header.Items.Add(new TreeViewItem
                     {
                         Header = "   (no views reachable)",
-                        Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x94, 0x9E)),
+                        Foreground = dim,
                         Tag = null,
                         FontWeight = FontWeights.Normal
                     });
@@ -174,6 +202,14 @@ namespace FlexView.Client
                 return;
             }
 
+            // Federated child-site view (read from the Management Server config): selectable only
+            // when opening a view, never as a save folder.
+            if (selected.Tag is FederationWalker.FedView)
+            {
+                btnSelect.IsEnabled = _mode == BrowseMode.SelectView;
+                return;
+            }
+
             var item = selected.Tag as Item;
             if (item == null)
             {
@@ -223,8 +259,12 @@ namespace FlexView.Client
         private static bool NodeMatches(TreeViewItem node, string query)
         {
             var item = node.Tag as Item;
-            if (item == null) return false;
-            return (item.Name ?? string.Empty).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+            if (item != null)
+                return (item.Name ?? string.Empty).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // Federated site-header / read-only child-view nodes carry no Item tag; match their text.
+            var header = node.Header as string;
+            return header != null && header.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void OnSelectClick(object sender, RoutedEventArgs e)
@@ -232,7 +272,20 @@ namespace FlexView.Client
             var selected = tree.SelectedItem as TreeViewItem;
             if (selected == null) return;
 
+            // TEST (federated views): a child-site view carries a FedView tag, not a client Item.
+            if (selected.Tag is FederationWalker.FedView fv)
+            {
+                SelectedFedView = fv;
+                SelectedItem = null;
+                SelectedParent = null;
+                SelectedIsCrossSite = true;
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected child-site view '{fv.Name}' on '{fv.SiteName}' (fqid={(fv.Fqid != null)})");
+                DialogResult = true;
+                return;
+            }
+
             SelectedItem = selected.Tag as Item;
+            SelectedFedView = null;
 
             var parentNode = selected.Parent as TreeViewItem;
             if (parentNode != null)

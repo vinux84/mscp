@@ -6,25 +6,46 @@ using VideoOS.Platform.ConfigurationItems;
 
 namespace FlexView.Client
 {
-    // TEST / DIAGNOSTIC (federated views): walks the master site and, in a Milestone Federated
-    // Architecture, its child sites, and collects the top-level view-group Items of each site so the
-    // Open dialog can present one merged, per-site tree. Master views come from the proven
-    // ClientControl API; child-site views are discovered by walking the site Item's configuration
-    // children looking for Kind.View roots.
+    // TEST / DIAGNOSTIC (federated views): reads views from the master site and, in a Milestone
+    // Federated Architecture, from its child sites too - straight off each site's Management Server
+    // configuration.
     //
-    // Everything is logged with the [FlexViewFed] prefix so a customer test run can be diagnosed from
-    // MIPLog.txt even when nothing appears in the tree - the log tells us whether child sites were
-    // enumerated at all, what each site exposed, and whether any view items were reachable.
+    // Views persist on the Management Server (ViewGroupFolder -> ViewGroup -> ViewFolder -> View),
+    // exactly like Recording Servers do (RecordingServerFolder -> RecordingServer). So the same
+    // per-site pattern that made System Status federation-aware works here: construct a
+    // ManagementServer from each site's FQID and enumerate its ViewGroupFolder. This is a
+    // configuration-plane read - it does NOT depend on a client session, so it is not subject to the
+    // "Cannot work with View Groups in standalone SDK" limitation that ClientControl hits.
     //
-    // The site-walk (EnumerateSites/CollectSites/SiteRef) is copied from the working federated
-    // System Status implementation so this reuses a proven pattern.
+    // Everything is logged with the [FlexViewFed] prefix (including a sample view's LayoutViewItems
+    // XML) so a customer test run can be diagnosed - and so we capture the layout format needed to
+    // recreate a child-site view on the parent.
     internal static class FederationWalker
     {
+        // A view read from a site's Management Server configuration.
+        internal sealed class FedView
+        {
+            public string SiteName;
+            public string GroupPath;         // "Group / Subgroup"
+            public string Name;
+            public string Id;
+            public string LayoutType;
+            public bool HasLayoutXml;
+            // Client FQID rebuilt from the view's ServerId + Id, so the view can be resolved back to a
+            // ViewAndLayoutItem via Configuration.Instance.GetItem and opened with the normal pipeline.
+            public FQID Fqid;
+        }
+
         internal sealed class SiteViews
         {
-            public string Label;          // e.g. "Master: HQ" or "Site: Branch-1"
-            public List<Item> ViewRoots;  // top-level view-group Items for this site
+            public string Label;                 // "Master: HQ" / "Site: Branch-1"
             public bool IsMaster;
+
+            // Master only: the client-runtime view roots, still used for the working same-site Open.
+            public List<Item> ClientViewRoots = new List<Item>();
+
+            // All sites: views read from the Management Server config (federation-capable proof path).
+            public List<FedView> FedViews = new List<FedView>();
         }
 
         // One site in the (possibly federated) hierarchy: the master or a child site.
@@ -53,118 +74,135 @@ namespace FlexView.Client
             {
                 bool isMaster = masterServerId != null && site.ServerId != null &&
                                 site.ServerId.Id == masterServerId.Id;
-                var roots = new List<Item>();
 
-                // The config-plane walk (Configuration.Instance.GetItem(site.Fqid) -> Kind.View) is
-                // the SAME accessor for master and child, because views persist on each site's
-                // management server, not only in the client runtime. Running it on the master too is
-                // the decisive test: if it finds the master's own views (which we KNOW exist), the
-                // approach is proven and child sites should behave identically.
-                var walked = new List<Item>();
+                var sv = new SiteViews
+                {
+                    Label = (isMaster ? "Master: " : "Site: ") + site.Name,
+                    IsMaster = isMaster
+                };
+
+                // Config-plane read: works for master and every child, off the Management Server.
                 try
                 {
-                    var siteItem = Configuration.Instance.GetItem(site.Fqid);
-                    if (siteItem == null)
-                        log.Info($"[FlexViewFed] [{site.Name}] GetItem(site) returned null - cannot walk views");
+                    var ms = new ManagementServer(site.Fqid);
+                    var vgf = ms.ViewGroupFolder;
+                    if (vgf?.ViewGroups == null)
+                        log.Info($"[FlexViewFed] [{site.Name}] ViewGroupFolder/ViewGroups is null");
                     else
-                        CollectViewRoots(siteItem, site.ServerId, walked, site.Name, new HashSet<Guid>(), 0);
+                        foreach (var vg in vgf.ViewGroups)
+                            WalkViewGroup(vg, site.Name, "", sv.FedViews, 0);
                 }
                 catch (Exception ex)
                 {
-                    log.Info($"[FlexViewFed] [{site.Name}] config-walk failed: {ex.Message}");
+                    log.Info($"[FlexViewFed] [{site.Name}] ManagementServer ViewGroup read failed: {ex.GetType().Name}: {ex.Message}");
                 }
-                log.Info($"[FlexViewFed] [{site.Name}] config-walk (GetItem+Kind.View) roots: {walked.Count}");
+                log.Info($"[FlexViewFed] [{site.Name}] views via ManagementServer config: {sv.FedViews.Count}");
 
+                // Master also keeps its client-runtime roots so same-site Open/edit stays fully working.
                 if (isMaster)
                 {
-                    // Baseline comparison: the known-good client accessor. If the config-walk count
-                    // matches this, the config-plane path is confirmed equivalent on the master.
-                    int clientCount = -1;
                     try
                     {
                         var groups = ClientControl.Instance.GetViewGroupItems();
-                        clientCount = groups?.Count ?? 0;
+                        if (groups != null) sv.ClientViewRoots.AddRange(groups);
+                        log.Info($"[FlexViewFed] [{site.Name}] (master) ClientControl roots: {sv.ClientViewRoots.Count}");
                     }
                     catch (Exception ex) { log.Info($"[FlexViewFed] [{site.Name}] GetViewGroupItems failed: {ex.Message}"); }
-                    log.Info($"[FlexViewFed] [{site.Name}] (master) ClientControl baseline: {clientCount} group(s) vs config-walk {walked.Count}");
-
-                    // Use whichever accessor actually produced roots so the Open tree still works today:
-                    // prefer the proven config-walk, fall back to ClientControl if it found nothing.
-                    if (walked.Count > 0)
-                        roots.AddRange(walked);
-                    else
-                    {
-                        try
-                        {
-                            var groups = ClientControl.Instance.GetViewGroupItems();
-                            if (groups != null) roots.AddRange(groups);
-                            log.Info($"[FlexViewFed] [{site.Name}] config-walk empty on master - using ClientControl ({roots.Count}).");
-                        }
-                        catch { }
-                    }
-                }
-                else
-                {
-                    roots.AddRange(walked);
                 }
 
-                result.Add(new SiteViews
-                {
-                    Label = (isMaster ? "Master: " : "Site: ") + site.Name,
-                    ViewRoots = roots,
-                    IsMaster = isMaster
-                });
+                result.Add(sv);
             }
 
             return result;
         }
 
-        // DFS from a site Item collecting the top-most Kind.View items. Descent stops once a Kind.View
-        // item is found on a branch (the browser recurses into it via GetChildren), and never crosses
-        // into a nested child site (a different ServerId) - those are separate site entries. Shallow
-        // levels are logged so we can see exactly what each site exposes.
-        private static void CollectViewRoots(Item node, ServerId siteServerId, List<Item> roots,
-                                             string siteName, HashSet<Guid> seen, int depth)
+        // Recurse a ViewGroup: collect its Views, then descend into nested ViewGroups. The first view
+        // encountered has its LayoutViewItems XML dumped (truncated) so we capture the layout format.
+        private static void WalkViewGroup(VideoOS.Platform.ConfigurationItems.ViewGroup vg, string siteName, string parentPath, List<FedView> acc, int depth)
         {
-            if (node?.FQID == null || depth > 6) return;
-            if (!seen.Add(node.FQID.ObjectId)) return;
+            if (vg == null || depth > 8) return;
+            var log = FlexViewDefinition.Log;
 
-            List<Item> kids = null;
-            try { kids = node.GetChildren(); }
+            string path = string.IsNullOrEmpty(parentPath) ? vg.Name : parentPath + " / " + vg.Name;
+
+            try
+            {
+                var vf = vg.ViewFolder;
+                if (vf?.Views != null)
+                {
+                    foreach (var v in vf.Views)
+                    {
+                        if (v == null) continue;
+                        string xml = null;
+                        try { xml = v.LayoutViewItems; } catch { }
+
+                        var fv = new FedView
+                        {
+                            SiteName = siteName,
+                            GroupPath = path,
+                            Name = v.Name,
+                            Id = v.Id,
+                            LayoutType = SafeGet(() => v.ViewLayoutType),
+                            HasLayoutXml = !string.IsNullOrEmpty(xml),
+                            Fqid = BuildViewFqid(v)
+                        };
+                        acc.Add(fv);
+
+                        // Dump the first view's layout so we know the XML shape for recreation.
+                        if (acc.Count == 1 && !string.IsNullOrEmpty(xml))
+                        {
+                            var preview = xml.Length > 800 ? xml.Substring(0, 800) + " ...[truncated]" : xml;
+                            log.Info($"[FlexViewFed] [{siteName}] sample view '{v.Name}' layoutType={fv.LayoutType} LayoutViewItems=\n{preview}");
+                        }
+                    }
+                }
+            }
             catch (Exception ex)
             {
-                FlexViewDefinition.Log.Info($"[FlexViewFed] [{siteName}] GetChildren failed at d{depth} on '{node.Name}': {ex.Message}");
-                return;
+                log.Info($"[FlexViewFed] [{siteName}] ViewFolder read failed under '{path}': {ex.Message}");
             }
-            if (kids == null) return;
 
-            foreach (var k in kids)
+            try
             {
-                if (k?.FQID == null) continue;
-
-                // A nested child site (different ServerId) is its own entry - do not descend.
-                if (k.FQID.ServerId != null && siteServerId != null && k.FQID.ServerId.Id != siteServerId.Id)
-                    continue;
-
-                if (depth <= 2)
-                    FlexViewDefinition.Log.Info($"[FlexViewFed] [{siteName}] d{depth} child: name='{k.Name}' kind={k.FQID.Kind} folder={k.FQID.FolderType}");
-
-                if (k.FQID.Kind == Kind.View)
-                {
-                    roots.Add(k);   // top-most view item on this branch; browser recurses into it
-                    continue;
-                }
-
-                CollectViewRoots(k, siteServerId, roots, siteName, seen, depth + 1);
+                var nested = vg.ViewGroupFolder;
+                if (nested?.ViewGroups != null)
+                    foreach (var child in nested.ViewGroups)
+                        WalkViewGroup(child, siteName, path, acc, depth + 1);
+            }
+            catch (Exception ex)
+            {
+                log.Info($"[FlexViewFed] [{siteName}] nested ViewGroupFolder read failed under '{path}': {ex.Message}");
             }
         }
 
-        // ── Proven federated site-walk (copied from System Status) ─────────────────────────────
+        private static string SafeGet(Func<string> f)
+        {
+            try { return f() ?? ""; } catch { return ""; }
+        }
 
-        // The raw site walk can surface FQIDs that are not genuine Management Servers (e.g. a
-        // Recording Server's own FQID that appears as a distinct ServerId). Keep only entries whose
-        // Management Server configuration is actually readable - probing RecordingServerFolder throws
-        // for anything that is not a real Management Server. Same filter as System Status.
+        // Rebuild a client FQID for a view from its config ServerId + Id, so it can be resolved back
+        // to a ViewAndLayoutItem with Configuration.Instance.GetItem - the same trick used to resolve
+        // a camera FQID elsewhere. Returns null if the id/server is not usable.
+        private static FQID BuildViewFqid(VideoOS.Platform.ConfigurationItems.View v)
+        {
+            try
+            {
+                if (v?.ServerId == null || string.IsNullOrEmpty(v.Id)) return null;
+                if (!Guid.TryParse(v.Id, out var objId)) return null;
+                return new FQID(v.ServerId, Guid.Empty, objId, FolderType.No, Kind.View);
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] BuildViewFqid failed for '{v?.Name}': {ex.Message}");
+                return null;
+            }
+        }
+
+        // ── Federated site enumeration (proven pattern from System Status) ─────────────────────
+
+        // Keep only entries whose Management Server configuration is actually readable: the raw walk
+        // can surface a Recording Server's own FQID as a distinct ServerId, and probing
+        // RecordingServerFolder throws for anything that is not a real Management Server.
         private static List<SiteRef> EnumerateManagementServers()
         {
             var log = FlexViewDefinition.Log;
@@ -178,12 +216,11 @@ namespace FlexView.Client
                 try
                 {
                     var management = new ManagementServer(s.Fqid);
-                    var _ = management.RecordingServerFolder?.RecordingServers; // throws if not a real MS
+                    var probe = management.RecordingServerFolder?.RecordingServers; // throws if not a real MS
                     result.Add(s);
                 }
                 catch (Exception ex)
                 {
-                    // Not a genuine Management Server (e.g. a Recording Server's own FQID) - excluded.
                     log.Info($"[FlexViewFed] Excluded non-management-server site '{s.Name}': {ex.GetType().Name}");
                 }
             }

@@ -1110,6 +1110,7 @@ namespace FlexView.Client
             _isEditMode = true;
             _editingView = view;
             _editingParent = parent;
+            _crossSiteSource = null;   // editing a real same-site view, not a cross-site copy
             _selectedPane = null;
             _hoveredPane = null;
 
@@ -1132,6 +1133,45 @@ namespace FlexView.Client
 
             RedrawCanvas();
             UpdateStatus();
+        }
+
+        // TEST (federated views): resolve a child-site view (read from its Management Server config)
+        // back to a client ViewAndLayoutItem via its rebuilt FQID, so the existing open/save pipeline
+        // can consume it. Returns null (logged) if the federated session cannot resolve the item -
+        // that result tells us whether this approach works before we fall back to parsing the raw
+        // LayoutViewItems XML.
+        private ViewAndLayoutItem ResolveFederatedView(FederationWalker.FedView fv)
+        {
+            try
+            {
+                if (fv?.Fqid == null)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: '{fv?.Name}' has no rebuilt FQID.");
+                    return null;
+                }
+
+                var item = Configuration.Instance.GetItem(fv.Fqid);
+                if (item == null)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: GetItem returned null for '{fv.Name}' (site '{fv.SiteName}').");
+                    return null;
+                }
+
+                var view = item as ViewAndLayoutItem;
+                if (view == null)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: item '{item.Name}' is {item.GetType().Name}, not ViewAndLayoutItem.");
+                    return null;
+                }
+
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve OK: '{view.Name}' from site '{fv.SiteName}'.");
+                return view;
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve failed for '{fv?.Name}': {ex.Message}");
+                return null;
+            }
         }
 
         // TEST (federated views): load a view that lives on a child site as an unsaved copy. We never
@@ -1302,21 +1342,37 @@ namespace FlexView.Client
                 // TEST (federated views): browse views across all sites (master + federated children).
                 var browser = new ViewBrowserWindow(BrowseMode.SelectView, federated: true);
                 browser.Owner = Application.Current.MainWindow;
-                if (browser.ShowDialog() == true && browser.SelectedItem != null)
+                if (browser.ShowDialog() != true) return;
+
+                // Child-site view: resolve its rebuilt FQID to a ViewAndLayoutItem, then load as a copy.
+                if (browser.SelectedFedView != null)
                 {
-                    var view = browser.SelectedItem as ViewAndLayoutItem;
-                    if (view == null)
+                    var childView = ResolveFederatedView(browser.SelectedFedView);
+                    if (childView == null)
                     {
-                        FlexViewDefinition.Log.Info($"[FlexViewFed] Selected item '{browser.SelectedItem.Name}' is not a ViewAndLayoutItem (kind={browser.SelectedItem.FQID?.Kind}).");
-                        MessageDialog.ShowError("Open Failed", "Selected item is not a view layout.", Window.GetWindow(this));
+                        MessageDialog.ShowError("Open Failed",
+                            "This view is on another site and could not be resolved through the current session. See MIPLog for details.",
+                            Window.GetWindow(this));
                         return;
                     }
-
-                    if (browser.SelectedIsCrossSite)
-                        LoadCrossSiteViewAsCopy(view);
-                    else
-                        LoadViewForEditing(view, browser.SelectedParent);
+                    LoadCrossSiteViewAsCopy(childView);
+                    return;
                 }
+
+                if (browser.SelectedItem == null) return;
+
+                var view = browser.SelectedItem as ViewAndLayoutItem;
+                if (view == null)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Selected item '{browser.SelectedItem.Name}' is not a ViewAndLayoutItem (kind={browser.SelectedItem.FQID?.Kind}).");
+                    MessageDialog.ShowError("Open Failed", "Selected item is not a view layout.", Window.GetWindow(this));
+                    return;
+                }
+
+                if (browser.SelectedIsCrossSite)
+                    LoadCrossSiteViewAsCopy(view);
+                else
+                    LoadViewForEditing(view, browser.SelectedParent);
             }
             catch (Exception ex)
             {
@@ -1359,8 +1415,18 @@ namespace FlexView.Client
             {
                 // TEST (federated views): a copy opened from a child site carries its source name and
                 // slot content (cameras / plugin view items) into the new view saved on the parent.
+                // Reading the source's slot children can fail for a federated item - degrade to a
+                // layout-only save rather than aborting.
                 string defaultName = _crossSiteSource?.Name;
-                List<SlotSnapshot> slotContent = _crossSiteSource != null ? SnapshotSlotContent(_crossSiteSource) : null;
+                List<SlotSnapshot> slotContent = null;
+                if (_crossSiteSource != null)
+                {
+                    try { slotContent = SnapshotSlotContent(_crossSiteSource); }
+                    catch (Exception ex)
+                    {
+                        FlexViewDefinition.Log.Info($"[FlexViewFed] SnapshotSlotContent failed for cross-site source: {ex.Message} - saving layout only.");
+                    }
+                }
 
                 var dlg = new SaveViewWindow(defaultName, _targetFolder);
                 dlg.Owner = Application.Current.MainWindow;
