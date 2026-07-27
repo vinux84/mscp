@@ -79,8 +79,27 @@ namespace FlexView.Client
             public ServerId ServerId;
         }
 
+        // Session-long cache: the walk costs real seconds even after skipping the master's wasted
+        // config-plane read (still several seconds per child site over the network), and views rarely
+        // change site-to-site within a single Smart Client session. Cached until ForceRefresh clears
+        // it (wired to a Refresh button in ViewBrowserWindow) - there's no automatic expiry, by design
+        // (the user asked for session-long caching with a manual refresh, not a time-based one).
+        // Guarded by a lock since CollectAllSiteViews runs on a background thread.
+        private static readonly object _cacheLock = new object();
+        private static List<SiteViews> _cache;
+
+        public static void ForceRefresh()
+        {
+            lock (_cacheLock) { _cache = null; }
+        }
+
         public static List<SiteViews> CollectAllSiteViews()
         {
+            lock (_cacheLock)
+            {
+                if (_cache != null) return _cache;
+            }
+
             var log = FlexViewDefinition.Log;
             var result = new List<SiteViews>();
 
@@ -143,6 +162,7 @@ namespace FlexView.Client
                 result.Add(sv);
             }
 
+            lock (_cacheLock) { _cache = result; }
             return result;
         }
 

@@ -76,8 +76,15 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock x:Name="headerText" Grid.Row="0" Text="Select a folder"
-                   Foreground="White" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10"/>
+        <DockPanel Grid.Row="0" Margin="0,0,0,10">
+            <Button x:Name="refreshButton" DockPanel.Dock="Right" Content="Refresh" Visibility="Collapsed"
+                    Style="{StaticResource FlatButton}"
+                    Click="OnRefreshClick" Padding="10,4"
+                    MinHeight="26" MinWidth="70" FontSize="11"
+                    ToolTip="Re-walk every site's views - use if a view was added, moved, or renamed on another site since this list was last loaded"/>
+            <TextBlock x:Name="headerText" Text="Select a folder"
+                       Foreground="White" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        </DockPanel>
 
         <TextBox x:Name="searchBox" Grid.Row="1" Margin="0,0,0,8"
                  Background="#FF050811" Foreground="#FFE6EDF3" CaretBrush="White"

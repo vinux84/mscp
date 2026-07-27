@@ -36,7 +36,18 @@ namespace FlexView.Client
                 ? "Select a folder to save the view in"
                 : "Select a view to edit";
             searchBox.ToolTip = "Type to filter by name";
+            refreshButton.Visibility = (_federated && _mode == BrowseMode.SelectView) ? Visibility.Visible : Visibility.Collapsed;
             LoadTree();
+        }
+
+        // The federated site/view list is cached for the session (see FederationWalker) - re-walking
+        // every site on every Open View click was the original ~90-second-per-open complaint. Refresh
+        // is the manual escape hatch for the rare case something changed on another site since.
+        private void OnRefreshClick(object sender, RoutedEventArgs e)
+        {
+            FederationWalker.ForceRefresh();
+            tree.Items.Clear();
+            LoadTreeFederatedAsync();
         }
 
         private void LoadTree()
@@ -88,6 +99,7 @@ namespace FlexView.Client
             };
             tree.Items.Add(loadingNode);
             searchBox.IsEnabled = false;
+            refreshButton.IsEnabled = false;
 
             List<FederationWalker.SiteViews> siteViews = null;
             try
@@ -101,6 +113,7 @@ namespace FlexView.Client
 
             tree.Items.Clear();
             searchBox.IsEnabled = true;
+            refreshButton.IsEnabled = true;
 
             if (siteViews == null || siteViews.Count <= 1)
             {
