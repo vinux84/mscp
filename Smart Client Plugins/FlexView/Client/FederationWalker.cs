@@ -44,11 +44,12 @@ namespace FlexView.Client
             public string LayoutViewItemsXml;
             public bool HasLayoutXml;
 
-            // Per-slot content (confirmed against a real system: LayoutViewItems/AddView only carry
-            // grid geometry - camera assignments live separately on ViewItemChildItems, one per pane,
-            // keyed by ViewItemPosition). Only camera slots are captured for now; other view item
-            // types (maps, HTML, plugins) are left as empty panes on copy.
-            public List<FedViewItem> Items = new List<FedViewItem>();
+            // Used only if/when this view is actually copied - see ReadCameraItems. Deliberately not
+            // read during the browse walk itself: fetching ViewItemChildItems for every view (rather
+            // than just the one the user picks) roughly doubled the walk's cost across a site with
+            // thousands of views, for data the browse tree never displays.
+            public ServerId SourceServerId;
+            public string SourcePath;
         }
 
         // One pane's content, parsed from a ViewItemChildItem's ViewItemDefinitionXml.
@@ -103,24 +104,13 @@ namespace FlexView.Client
                     IsMaster = isMaster
                 };
 
-                // Config-plane read: works for master and every child, off the Management Server.
-                try
-                {
-                    var ms = new ManagementServer(site.Fqid);
-                    var vgf = ms.ViewGroupFolder;
-                    if (vgf?.ViewGroups == null)
-                        log.Info($"[FlexViewFed] [{site.Name}] ViewGroupFolder/ViewGroups is null");
-                    else
-                        foreach (var vg in vgf.ViewGroups)
-                            WalkViewGroup(vg, site.Name, "", sv.FedViews, 0);
-                }
-                catch (Exception ex)
-                {
-                    log.Info($"[FlexViewFed] [{site.Name}] ManagementServer ViewGroup read failed: {ex.GetType().Name}: {ex.Message}");
-                }
-                log.Info($"[FlexViewFed] [{site.Name}] views via ManagementServer config: {sv.FedViews.Count}");
-
-                // Master also keeps its client-runtime roots so same-site Open/edit stays fully working.
+                // Master already has a fully working client-runtime tree (below) - PopulateFederatedTree
+                // renders the master from ClientViewRoots, never FedViews, so walking the master's
+                // config-plane view tree here is pure wasted work. Confirmed against a real system:
+                // that walk alone (3411 views) took ~73 seconds of the ~90 second total load time, for
+                // data that was computed and then never used. Only child sites need the config-plane
+                // walk - they have no working client-session tree at all (that's the original bug this
+                // whole file exists to work around).
                 if (isMaster)
                 {
                     try
@@ -130,6 +120,24 @@ namespace FlexView.Client
                         log.Info($"[FlexViewFed] [{site.Name}] (master) ClientControl roots: {sv.ClientViewRoots.Count}");
                     }
                     catch (Exception ex) { log.Info($"[FlexViewFed] [{site.Name}] GetViewGroupItems failed: {ex.Message}"); }
+                }
+                else
+                {
+                    try
+                    {
+                        var ms = new ManagementServer(site.Fqid);
+                        var vgf = ms.ViewGroupFolder;
+                        if (vgf?.ViewGroups == null)
+                            log.Info($"[FlexViewFed] [{site.Name}] ViewGroupFolder/ViewGroups is null");
+                        else
+                            foreach (var vg in vgf.ViewGroups)
+                                WalkViewGroup(vg, site.Name, "", sv.FedViews, 0);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Info($"[FlexViewFed] [{site.Name}] ManagementServer ViewGroup read failed: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    log.Info($"[FlexViewFed] [{site.Name}] views via ManagementServer config: {sv.FedViews.Count}");
                 }
 
                 result.Add(sv);
@@ -169,7 +177,14 @@ namespace FlexView.Client
                             LayoutCustomId = SafeGet(() => v.LayoutCustomId),
                             LayoutIcon = SafeGet(() => v.LayoutIcon),
                             LayoutViewItemsXml = xml,
-                            HasLayoutXml = !string.IsNullOrEmpty(xml)
+                            HasLayoutXml = !string.IsNullOrEmpty(xml),
+                            // Cheap - ServerId/Path are already-loaded fields on v, not a network call.
+                            // Used to re-fetch just this one view's ViewItemChildItems later, at copy
+                            // time, instead of every view paying that cost during the browse walk (that
+                            // used to double the walk's cost across thousands of views for no benefit -
+                            // only the one view actually being copied ever needs its camera content).
+                            SourceServerId = SafeGetServerId(() => v.ServerId),
+                            SourcePath = SafeGet(() => v.Path)
                         };
                         acc.Add(fv);
 
@@ -178,37 +193,6 @@ namespace FlexView.Client
                         {
                             var preview = xml.Length > 800 ? xml.Substring(0, 800) + " ...[truncated]" : xml;
                             log.Info($"[FlexViewFed] [{siteName}] sample view '{v.Name}' layoutType={fv.LayoutType} LayoutViewItems=\n{preview}");
-                        }
-
-                        // LayoutViewItems only carries grid geometry - AddView recreates the panes but not
-                        // camera content (confirmed against a real system: copied views come back with
-                        // correct layout, empty slots). Per-slot content lives separately on
-                        // ViewItemChildItems, one per pane, keyed by ViewItemPosition. A camera slot's
-                        // ViewItemDefinitionXml looks like (confirmed from a real dump):
-                        //   <viewitem type="...CameraContentType.CameraViewItem, VideoOS.RemoteClient.Application">
-                        //     <iteminfo cameraid="{guid}" .../>
-                        //   </viewitem>
-                        // Other view item types (maps, HTML, plugins) aren't parsed yet - camera is the
-                        // common case this plugin needs to carry across a federated copy.
-                        try
-                        {
-                            var children = v.ViewItemChildItems;
-                            if (children != null)
-                            {
-                                foreach (var vi in children)
-                                {
-                                    if (vi == null) continue;
-                                    var camId = ParseCameraId(vi.ViewItemDefinitionXml);
-                                    if (camId != null)
-                                        fv.Items.Add(new FedViewItem { Position = vi.ViewItemPosition, CameraId = camId });
-                                }
-                            }
-                            if (acc.Count <= 5)
-                                log.Info($"[FlexViewFed] [{siteName}] view '{v.Name}': {children?.Count ?? 0} view item(s), {fv.Items.Count} camera(s) parsed");
-                        }
-                        catch (Exception ex)
-                        {
-                            log.Info($"[FlexViewFed] [{siteName}] ViewItemChildItems read failed for '{v.Name}': {ex.Message}");
                         }
                     }
                 }
@@ -234,6 +218,48 @@ namespace FlexView.Client
         private static string SafeGet(Func<string> f)
         {
             try { return f() ?? ""; } catch { return ""; }
+        }
+
+        private static ServerId SafeGetServerId(Func<ServerId> f)
+        {
+            try { return f(); } catch { return null; }
+        }
+
+        // Re-fetches ViewItemChildItems for exactly one view - called only when that view is actually
+        // being copied (see FedView.SourceServerId/SourcePath). A camera slot's ViewItemDefinitionXml
+        // looks like (confirmed from a real dump):
+        //   <viewitem type="...CameraContentType.CameraViewItem, VideoOS.RemoteClient.Application">
+        //     <iteminfo cameraid="{guid}" .../>
+        //   </viewitem>
+        // Other view item types (maps, HTML, plugins) aren't parsed yet - camera is the common case
+        // this plugin needs to carry across a federated copy.
+        internal static List<FedViewItem> ReadCameraItems(FedView fv)
+        {
+            var result = new List<FedViewItem>();
+            if (fv?.SourceServerId == null || string.IsNullOrEmpty(fv.SourcePath)) return result;
+
+            var log = FlexViewDefinition.Log;
+            try
+            {
+                var v = new VideoOS.Platform.ConfigurationItems.View(fv.SourceServerId, fv.SourcePath);
+                var children = v.ViewItemChildItems;
+                if (children != null)
+                {
+                    foreach (var vi in children)
+                    {
+                        if (vi == null) continue;
+                        var camId = ParseCameraId(vi.ViewItemDefinitionXml);
+                        if (camId != null)
+                            result.Add(new FedViewItem { Position = vi.ViewItemPosition, CameraId = camId });
+                    }
+                }
+                log.Info($"[FlexViewFed] ReadCameraItems('{fv.Name}'): {children?.Count ?? 0} view item(s), {result.Count} camera(s) parsed");
+            }
+            catch (Exception ex)
+            {
+                log.Info($"[FlexViewFed] ReadCameraItems failed for '{fv.Name}': {ex.Message}");
+            }
+            return result;
         }
 
         // Extracts the camera GUID from a single view item's definition XML, when it's a camera

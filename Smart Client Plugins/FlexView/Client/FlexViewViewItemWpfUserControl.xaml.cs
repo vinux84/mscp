@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Threading.Tasks;
 using FlexView.Models;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
@@ -1137,7 +1138,18 @@ namespace FlexView.Client
         // ViewSync's README documents for View Groups). The destination write goes through the same
         // ConfigurationItems API (ViewGroup.ViewFolder.AddView), just targeted at this, locally
         // connected/writable site instead of the source.
-        private void CopyFederatedViewToLocal(FederationWalker.FedView fv)
+        private class CopyResult
+        {
+            public int Restored;
+            public int Attempted;
+        }
+
+        // AddView + WaitForServerTask + the camera-restore retry can together take anywhere from a
+        // few seconds to close to a minute against a real system (confirmed: network round-trips per
+        // poll, not just the sleep between them, add up). All of that used to run directly on the UI
+        // thread and froze Smart Client for the whole duration - it's offloaded to a background
+        // thread here; only the two dialogs (folder/name prompt, and the final result) touch the UI.
+        private async void CopyFederatedViewToLocal(FederationWalker.FedView fv)
         {
             if (fv == null || !fv.HasLayoutXml)
             {
@@ -1151,35 +1163,19 @@ namespace FlexView.Client
             dlg.Owner = Application.Current.MainWindow;
             if (dlg.ShowDialog() != true) return;
 
+            var destFolder = dlg.SelectedFolder;
+            var newName = dlg.ViewName;
+
             try
             {
-                var masterFqid = EnvironmentManager.Instance.MasterSite;
-                if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+                var result = await Task.Run(() => DoCopyFederatedView(fv, destFolder, newName));
 
-                var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
-                var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, dlg.SelectedFolder.FQID.ObjectId);
-                if (viewGroup == null)
-                    throw new InvalidOperationException($"Could not locate '{dlg.SelectedFolder.Name}' in the site configuration.");
-
-                var task = viewGroup.ViewFolder.AddView(
-                    dlg.ViewName,
-                    fv.Shortcut ?? "",
-                    fv.LayoutType ?? "",
-                    fv.LayoutCustomId ?? "",
-                    fv.LayoutIcon ?? "",
-                    fv.LayoutViewItemsXml);
-                WaitForServerTask(task, "AddView");
-
-                int restored = 0, attempted = fv.Items.Count;
-                if (attempted > 0)
-                    restored = RestoreCameraSlots(masterFqid.ServerId, task.Path, fv.Items);
-
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{dlg.SelectedFolder.Name}' as '{dlg.ViewName}' ({restored}/{attempted} camera(s) restored).");
-                var cameraNote = attempted == 0 ? "" : restored == attempted
-                    ? $" All {attempted} camera(s) were carried over."
-                    : $" {restored} of {attempted} camera(s) were carried over - see MIPLog for the rest.";
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{destFolder.Name}' as '{newName}' ({result.Restored}/{result.Attempted} camera(s) restored).");
+                var cameraNote = result.Attempted == 0 ? "" : result.Restored == result.Attempted
+                    ? $" All {result.Attempted} camera(s) were carried over."
+                    : $" {result.Restored} of {result.Attempted} camera(s) were carried over - see MIPLog for the rest.";
                 MessageDialog.ShowSuccess("View Copied",
-                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{dlg.SelectedFolder.Name}\" as \"{dlg.ViewName}\".{cameraNote}",
+                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{destFolder.Name}\" as \"{newName}\".{cameraNote}",
                     Window.GetWindow(this));
             }
             catch (Exception ex)
@@ -1187,6 +1183,33 @@ namespace FlexView.Client
                 FlexViewDefinition.Log.Info($"[FlexViewFed] CopyFederatedViewToLocal failed: {ex}");
                 MessageDialog.ShowError("Copy Failed", $"Failed to copy the view:\n{ex.Message}", Window.GetWindow(this));
             }
+        }
+
+        // The actual copy, run on a background thread - no UI/Dispatcher access in here.
+        private static CopyResult DoCopyFederatedView(FederationWalker.FedView fv, Item destFolder, string newName)
+        {
+            var masterFqid = EnvironmentManager.Instance.MasterSite;
+            if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+
+            var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
+            var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, destFolder.FQID.ObjectId);
+            if (viewGroup == null)
+                throw new InvalidOperationException($"Could not locate '{destFolder.Name}' in the site configuration.");
+
+            var task = viewGroup.ViewFolder.AddView(
+                newName,
+                fv.Shortcut ?? "",
+                fv.LayoutType ?? "",
+                fv.LayoutCustomId ?? "",
+                fv.LayoutIcon ?? "",
+                fv.LayoutViewItemsXml);
+            WaitForServerTask(task, "AddView");
+
+            var cameraItems = FederationWalker.ReadCameraItems(fv);
+            var result = new CopyResult { Attempted = cameraItems.Count };
+            if (result.Attempted > 0)
+                result.Restored = RestoreCameraSlots(masterFqid.ServerId, task.Path, cameraItems);
+            return result;
         }
 
         // Restores camera slots onto the view AddView just created. The destination is always local
