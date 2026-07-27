@@ -1153,7 +1153,14 @@ namespace FlexView.Client
 
             try
             {
-                var viewGroup = new VideoOS.Platform.ConfigurationItems.ViewGroup(dlg.SelectedFolder.FQID);
+                var masterFqid = EnvironmentManager.Instance.MasterSite;
+                if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+
+                var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
+                var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, dlg.SelectedFolder.FQID.ObjectId);
+                if (viewGroup == null)
+                    throw new InvalidOperationException($"Could not locate '{dlg.SelectedFolder.Name}' in the site configuration.");
+
                 var task = viewGroup.ViewFolder.AddView(
                     dlg.ViewName,
                     fv.Shortcut ?? "",

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -42,7 +43,7 @@ namespace FlexView.Client
         {
             if (_federated && _mode == BrowseMode.SelectView)
             {
-                LoadTreeFederated();
+                LoadTreeFederatedAsync();
                 return;
             }
             LoadTreeClassic();
@@ -71,27 +72,50 @@ namespace FlexView.Client
             }
         }
 
-        // TEST (federated views): one non-selectable header node per site, each holding that site's
-        // view roots. On a non-federated system (only the master) this falls back to the classic
-        // flat tree so behavior is unchanged.
-        private void LoadTreeFederated()
+        // One non-selectable header node per site, each holding that site's view roots. On a
+        // non-federated system (only the master) this falls back to the classic flat tree so
+        // behavior is unchanged. CollectAllSiteViews walks every site's config over the network -
+        // it previously ran synchronously in the constructor and froze the whole Smart Client host
+        // for as long as that took (over a minute on a real hierarchy), so it's offloaded to a
+        // background thread here and the tree is only populated once it completes.
+        private async void LoadTreeFederatedAsync()
         {
-            List<FederationWalker.SiteViews> siteViews;
-            try { siteViews = FederationWalker.CollectAllSiteViews(); }
+            var loadingNode = new TreeViewItem
+            {
+                Header = "Loading sites...",
+                Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x94, 0x9E)),
+                IsEnabled = false
+            };
+            tree.Items.Add(loadingNode);
+            searchBox.IsEnabled = false;
+
+            List<FederationWalker.SiteViews> siteViews = null;
+            try
+            {
+                siteViews = await Task.Run(() => FederationWalker.CollectAllSiteViews());
+            }
             catch (Exception ex)
             {
                 FlexViewDefinition.Log.Info($"[FlexViewFed] CollectAllSiteViews failed: {ex.Message}");
-                LoadTreeClassic();
-                return;
             }
+
+            tree.Items.Clear();
+            searchBox.IsEnabled = true;
 
             if (siteViews == null || siteViews.Count <= 1)
             {
-                FlexViewDefinition.Log.Info("[FlexViewFed] Single site (no children) - using classic flat tree.");
+                FlexViewDefinition.Log.Info(siteViews == null
+                    ? "[FlexViewFed] CollectAllSiteViews failed - using classic flat tree."
+                    : "[FlexViewFed] Single site (no children) - using classic flat tree.");
                 LoadTreeClassic();
                 return;
             }
 
+            PopulateFederatedTree(siteViews);
+        }
+
+        private void PopulateFederatedTree(List<FederationWalker.SiteViews> siteViews)
+        {
             var dim = new SolidColorBrush(Color.FromRgb(0x8B, 0x94, 0x9E));
 
             foreach (var sv in siteViews)

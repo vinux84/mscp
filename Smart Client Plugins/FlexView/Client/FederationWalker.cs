@@ -191,6 +191,24 @@ namespace FlexView.Client
             try { return f() ?? ""; } catch { return ""; }
         }
 
+        // Finds a ViewGroup config object anywhere under a ViewGroupFolder tree by matching its Id,
+        // walking properties rather than constructing a ViewGroup(FQID) directly from a client Item's
+        // FQID - that constructor validates the FQID came from the same configuration-API object
+        // graph (it throws "Invalid kind for this constructor" otherwise), which a client-session
+        // Item's FQID never satisfies. Every existing working read in this file reaches a ViewGroup
+        // the same way: navigate down from a genuine site FQID via .ViewGroupFolder/.ViewFolder.
+        internal static VideoOS.Platform.ConfigurationItems.ViewGroup FindViewGroupById(ViewGroupFolder folder, Guid id)
+        {
+            if (folder?.ViewGroups == null) return null;
+            foreach (var vg in folder.ViewGroups)
+            {
+                if (Guid.TryParse(vg.Id, out var vgId) && vgId == id) return vg;
+                var found = FindViewGroupById(vg.ViewGroupFolder, id);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
         // ── Federated site enumeration (proven pattern from System Status) ─────────────────────
 
         // Keep only entries whose Management Server configuration is actually readable: the raw walk
