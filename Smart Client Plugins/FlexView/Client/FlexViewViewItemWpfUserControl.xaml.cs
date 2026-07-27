@@ -9,7 +9,6 @@ using System.Windows.Shapes;
 using FlexView.Models;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
-using VideoOS.Platform.ConfigurationItems;
 using SdkRectangle = System.Drawing.Rectangle;
 
 namespace FlexView.Client
@@ -1154,7 +1153,7 @@ namespace FlexView.Client
 
             try
             {
-                var viewGroup = new ViewGroup(dlg.SelectedFolder.FQID);
+                var viewGroup = new VideoOS.Platform.ConfigurationItems.ViewGroup(dlg.SelectedFolder.FQID);
                 var task = viewGroup.ViewFolder.AddView(
                     dlg.ViewName,
                     fv.Shortcut ?? "",
