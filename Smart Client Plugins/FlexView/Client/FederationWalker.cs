@@ -59,6 +59,18 @@ namespace FlexView.Client
             public Guid? CameraId;
         }
 
+        // A client Item plus its already-fetched children, built once while the site is walked.
+        // ViewBrowserWindow used to call Item.GetChildren() itself, live, to build the master's tree
+        // on every single Open View click - that recursive fetch across ~113+ view groups was the
+        // remaining ~10 second cost even after CollectAllSiteViews itself became a cache hit. Caching
+        // the resolved children here means rebuilding the on-screen tree from a cache hit is pure
+        // in-memory recursion, no network calls at all.
+        internal sealed class ClientNode
+        {
+            public Item Item;
+            public List<ClientNode> Children = new List<ClientNode>();
+        }
+
         internal sealed class SiteViews
         {
             public string Label;                 // "Master: HQ" / "Site: Branch-1"
@@ -66,6 +78,9 @@ namespace FlexView.Client
 
             // Master only: the client-runtime view roots, still used for the working same-site Open.
             public List<Item> ClientViewRoots = new List<Item>();
+
+            // Master only: same roots, pre-expanded - see ClientNode.
+            public List<ClientNode> ClientTree = new List<ClientNode>();
 
             // All sites: views read from the Management Server config (federation-capable proof path).
             public List<FedView> FedViews = new List<FedView>();
@@ -135,7 +150,12 @@ namespace FlexView.Client
                     try
                     {
                         var groups = ClientControl.Instance.GetViewGroupItems();
-                        if (groups != null) sv.ClientViewRoots.AddRange(groups);
+                        if (groups != null)
+                        {
+                            sv.ClientViewRoots.AddRange(groups);
+                            foreach (var g in groups)
+                                sv.ClientTree.Add(BuildClientNode(g, 0));
+                        }
                         log.Info($"[FlexViewFed] [{site.Name}] (master) ClientControl roots: {sv.ClientViewRoots.Count}");
                     }
                     catch (Exception ex) { log.Info($"[FlexViewFed] [{site.Name}] GetViewGroupItems failed: {ex.Message}"); }
@@ -164,6 +184,26 @@ namespace FlexView.Client
 
             lock (_cacheLock) { _cache = result; }
             return result;
+        }
+
+        // Recurse a client Item's children once, up front, so ViewBrowserWindow never has to call
+        // GetChildren() itself when rebuilding the tree from a cache hit.
+        private static ClientNode BuildClientNode(Item item, int depth)
+        {
+            var node = new ClientNode { Item = item };
+            if (item == null || depth > 12) return node;
+
+            bool isFolder;
+            try { isFolder = item.FQID.FolderType != FolderType.No; } catch { isFolder = false; }
+            if (!isFolder) return node;
+
+            List<Item> children = null;
+            try { children = (item as ConfigItem)?.GetChildren(); } catch { }
+            if (children == null) return node;
+
+            foreach (var child in children)
+                node.Children.Add(BuildClientNode(child, depth + 1));
+            return node;
         }
 
         // Recurse a ViewGroup: collect its Views, then descend into nested ViewGroups. The first view

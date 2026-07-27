@@ -145,10 +145,11 @@ namespace FlexView.Client
 
                 if (sv.IsMaster)
                 {
-                    // Master: real client Items - fully selectable/openable, same as today.
-                    foreach (var root in sv.ClientViewRoots)
+                    // Master: real client Items, fully selectable/openable - built from the pre-fetched
+                    // ClientTree (no GetChildren() calls here) so a cache hit is pure in-memory work.
+                    foreach (var rootNode in sv.ClientTree)
                     {
-                        var node = CreateTreeNode(root);
+                        var node = CreateTreeNodeFromClientNode(rootNode);
                         if (node != null) { header.Items.Add(node); added++; }
                     }
                 }
@@ -186,6 +187,35 @@ namespace FlexView.Client
 
                 tree.Items.Add(header);
             }
+        }
+
+        // Builds a TreeViewItem straight from a pre-fetched ClientNode - no GetChildren() calls, since
+        // those were already resolved once when the site walk ran (see FederationWalker.BuildClientNode).
+        // This is what makes a cache hit actually fast: without it, rebuilding the master's ~113+ view
+        // group tree via live GetChildren() calls was still costing ~10 seconds on every Open View
+        // click, even after CollectAllSiteViews itself started returning instantly from cache.
+        private TreeViewItem CreateTreeNodeFromClientNode(FederationWalker.ClientNode node)
+        {
+            var item = node?.Item;
+            if (item == null) return null;
+
+            bool isFolder;
+            try { isFolder = item.FQID.FolderType != FolderType.No; } catch { isFolder = false; }
+
+            var treeViewItem = new TreeViewItem
+            {
+                Header = (isFolder ? "\U0001F4C1 " : "\U0001F4CB ") + item.Name,
+                Tag = item,
+                IsExpanded = true,
+            };
+
+            foreach (var child in node.Children)
+            {
+                var childNode = CreateTreeNodeFromClientNode(child);
+                if (childNode != null) treeViewItem.Items.Add(childNode);
+            }
+
+            return treeViewItem;
         }
 
         private TreeViewItem CreateTreeNode(Item item)
