@@ -1149,6 +1149,52 @@ namespace FlexView.Client
             public List<FederationWalker.FedViewItem> CameraItems;
         }
 
+        // Resolved once per destination folder, then reused for every view in a batch copy - avoids
+        // re-walking the whole ViewGroupFolder tree (FindViewGroupById) once per selected view, and
+        // ExistingNames lets every view in the batch get a unique name up front instead of each one
+        // finding out about a collision only when AddView itself rejects it.
+        private class DestinationInfo
+        {
+            public VideoOS.Platform.ConfigurationItems.ViewGroup ViewGroup;
+            public ServerId MasterServerId;
+            public HashSet<string> ExistingNames;
+        }
+
+        // Background-thread phase: raw config-API only, no client-session objects touched.
+        private static DestinationInfo ResolveDestination(Item destFolder)
+        {
+            var masterFqid = EnvironmentManager.Instance.MasterSite;
+            if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+
+            var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
+            var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, destFolder.FQID.ObjectId);
+            if (viewGroup == null)
+                throw new InvalidOperationException($"Could not locate '{destFolder.Name}' in the site configuration.");
+
+            var existingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var views = viewGroup.ViewFolder?.Views;
+                if (views != null) foreach (var v in views) existingNames.Add(v.Name);
+            }
+            catch { }
+
+            return new DestinationInfo { ViewGroup = viewGroup, MasterServerId = masterFqid.ServerId, ExistingNames = existingNames };
+        }
+
+        // Appends " (n)" until the name doesn't collide with anything already in ExistingNames -
+        // covers both views already in the destination folder and other views earlier in this same
+        // batch (ExistingNames is mutated as each name is claimed).
+        private static string UniqueName(HashSet<string> existingNames, string baseName)
+        {
+            var candidate = baseName;
+            var n = 1;
+            while (existingNames.Contains(candidate))
+                candidate = $"{baseName} ({++n})";
+            existingNames.Add(candidate);
+            return candidate;
+        }
+
         // AddView + WaitForServerTask + reading the source's camera items are all raw config-API
         // calls (VideoOS.Platform.ConfigurationItems) - thread-agnostic, confirmed safe on a
         // background thread. Restoring those cameras onto the new view is NOT: that touches a
@@ -1174,7 +1220,11 @@ namespace FlexView.Client
 
             try
             {
-                var prep = await Task.Run(() => PrepareFederatedCopy(fv, destFolder, newName));
+                var prep = await Task.Run(() =>
+                {
+                    var dest = ResolveDestination(destFolder);
+                    return PrepareFederatedCopy(fv, dest.ViewGroup, dest.MasterServerId, newName);
+                });
 
                 int restored = 0, attempted = prep.CameraItems.Count;
                 if (attempted > 0)
@@ -1195,17 +1245,67 @@ namespace FlexView.Client
             }
         }
 
-        // Background-thread phase: raw config-API only, no client-session objects touched.
-        private static PreparedCopy PrepareFederatedCopy(FederationWalker.FedView fv, Item destFolder, string newName)
+        // Batch version: one destination folder for every selected view (picked once, not per view),
+        // each view keeps its own name - auto-deduped via UniqueName rather than prompted per view -
+        // and one summary dialog covers the whole batch instead of one dialog per view. A failure on
+        // one view is recorded in the summary and does not stop the rest of the batch.
+        private async void CopyMultipleFederatedViewsToLocal(List<FederationWalker.FedView> views)
         {
-            var masterFqid = EnvironmentManager.Instance.MasterSite;
-            if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+            if (views == null || views.Count == 0) return;
 
-            var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
-            var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, destFolder.FQID.ObjectId);
-            if (viewGroup == null)
-                throw new InvalidOperationException($"Could not locate '{destFolder.Name}' in the site configuration.");
+            var folderPicker = new ViewBrowserWindow(BrowseMode.SelectFolder);
+            folderPicker.Owner = Application.Current.MainWindow;
+            if (folderPicker.ShowDialog() != true || folderPicker.SelectedItem == null) return;
+            var destFolder = folderPicker.SelectedItem;
 
+            DestinationInfo dest;
+            try
+            {
+                dest = await Task.Run(() => ResolveDestination(destFolder));
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] CopyMultipleFederatedViewsToLocal failed to resolve destination: {ex}");
+                MessageDialog.ShowError("Copy Failed", $"Failed to copy views:\n{ex.Message}", Window.GetWindow(this));
+                return;
+            }
+
+            var lines = new List<string>();
+            int succeeded = 0;
+
+            foreach (var fv in views)
+            {
+                var newName = UniqueName(dest.ExistingNames, fv.Name);
+                try
+                {
+                    var prep = await Task.Run(() => PrepareFederatedCopy(fv, dest.ViewGroup, dest.MasterServerId, newName));
+
+                    int restored = 0, attempted = prep.CameraItems.Count;
+                    if (attempted > 0)
+                        restored = await RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
+
+                    lines.Add(attempted == 0
+                        ? $"✓ \"{newName}\" (from {fv.SiteName})"
+                        : $"✓ \"{newName}\" (from {fv.SiteName}) - {restored}/{attempted} camera(s)");
+                    succeeded++;
+                }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Batch copy failed for '{fv.Name}' ({fv.SiteName}): {ex}");
+                    lines.Add($"✗ \"{fv.Name}\" (from {fv.SiteName}) - {ex.Message}");
+                }
+            }
+
+            FlexViewDefinition.Log.Info($"[FlexViewFed] Batch copy into '{destFolder.Name}': {succeeded}/{views.Count} view(s) copied.");
+            var title = succeeded == views.Count ? "Views Copied" : "Some Views Failed";
+            MessageDialog.ShowSuccess(title,
+                $"{succeeded} of {views.Count} view(s) copied into \"{destFolder.Name}\":\n\n" + string.Join("\n", lines),
+                Window.GetWindow(this));
+        }
+
+        // Background-thread phase: raw config-API only, no client-session objects touched.
+        private static PreparedCopy PrepareFederatedCopy(FederationWalker.FedView fv, VideoOS.Platform.ConfigurationItems.ViewGroup viewGroup, ServerId masterServerId, string newName)
+        {
             var task = viewGroup.ViewFolder.AddView(
                 newName,
                 fv.Shortcut ?? "",
@@ -1218,7 +1318,7 @@ namespace FlexView.Client
             return new PreparedCopy
             {
                 NewViewPath = task.Path,
-                MasterServerId = masterFqid.ServerId,
+                MasterServerId = masterServerId,
                 CameraItems = FederationWalker.ReadCameraItems(fv)
             };
         }
@@ -1457,6 +1557,13 @@ namespace FlexView.Client
                 var browser = new ViewBrowserWindow(BrowseMode.SelectView, federated: true);
                 browser.Owner = Application.Current.MainWindow;
                 if (browser.ShowDialog() != true) return;
+
+                // Multiple checked child-site views: one folder picker, one batch copy, one summary.
+                if (browser.SelectedFedViews != null && browser.SelectedFedViews.Count > 0)
+                {
+                    CopyMultipleFederatedViewsToLocal(browser.SelectedFedViews);
+                    return;
+                }
 
                 // Child-site view: copy its captured layout XML straight into a folder on this site,
                 // rather than trying to resolve it to a live ViewAndLayoutItem - Views are not part of

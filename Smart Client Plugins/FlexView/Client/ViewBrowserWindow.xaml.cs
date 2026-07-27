@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -24,6 +25,13 @@ namespace FlexView.Client
         // Set when the selection is a child-site view read from the Management Server config
         // (rather than a master client Item). Carries its captured layout XML for copying.
         internal FederationWalker.FedView SelectedFedView { get; private set; }
+
+        // Set instead of SelectedFedView when one or more checkboxes are checked - batch copy mode.
+        // Takes priority over SelectedFedView/SelectedItem when populated.
+        internal List<FederationWalker.FedView> SelectedFedViews { get; private set; }
+
+        // Tracks which federated views are checked, across every site's subtree in the tree at once.
+        private readonly HashSet<FederationWalker.FedView> _checkedFedViews = new HashSet<FederationWalker.FedView>();
 
         public ViewBrowserWindow(BrowseMode mode) : this(mode, false) { }
 
@@ -158,13 +166,39 @@ namespace FlexView.Client
                     // Child site: views read from the Management Server config, each carrying its own
                     // captured layout XML so it can be copied into a folder on this site without ever
                     // needing a client-side handle to the source view. Views whose layout XML could
-                    // not be read are shown but not selectable.
+                    // not be read are shown but not selectable. Openable ones get a checkbox so several
+                    // can be picked at once for a batch copy, in addition to the existing single-click
+                    // Select flow.
                     foreach (var fv in sv.FedViews)
                     {
                         bool openable = fv.HasLayoutXml;
+                        var label = $"{fv.GroupPath} / {fv.Name}" + (openable ? "" : "   [not resolvable]");
+
+                        object headerContent;
+                        if (openable)
+                        {
+                            var panel = new StackPanel { Orientation = Orientation.Horizontal };
+                            var checkBox = new CheckBox
+                            {
+                                Tag = fv,
+                                VerticalAlignment = VerticalAlignment.Center,
+                                Margin = new Thickness(0, 0, 6, 0),
+                                IsChecked = _checkedFedViews.Contains(fv)
+                            };
+                            checkBox.Checked += OnFedViewCheckChanged;
+                            checkBox.Unchecked += OnFedViewCheckChanged;
+                            panel.Children.Add(checkBox);
+                            panel.Children.Add(new TextBlock { Text = "\U0001F4CB " + label, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center });
+                            headerContent = panel;
+                        }
+                        else
+                        {
+                            headerContent = "\U0001F4CB " + label;
+                        }
+
                         header.Items.Add(new TreeViewItem
                         {
-                            Header = $"\U0001F4CB {fv.GroupPath} / {fv.Name}" + (openable ? "" : "   [not resolvable]"),
+                            Header = headerContent,
                             Foreground = openable ? Brushes.White : dim,
                             Tag = openable ? fv : null,     // FedView tag = selectable child view
                             FontWeight = FontWeights.Normal,
@@ -257,6 +291,15 @@ namespace FlexView.Client
 
         private void Tree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
         {
+            // While any checkboxes are checked, the button is in batch-copy mode and its enabled
+            // state/label are driven by the checked count, not by whatever row happens to be
+            // highlighted - see OnFedViewCheckChanged.
+            if (_checkedFedViews.Count > 0) return;
+            RefreshSelectButtonForSingleSelection();
+        }
+
+        private void RefreshSelectButtonForSingleSelection()
+        {
             var selected = tree.SelectedItem as TreeViewItem;
             if (selected == null)
             {
@@ -285,6 +328,29 @@ namespace FlexView.Client
                 btnSelect.IsEnabled = isFolder;
             else
                 btnSelect.IsEnabled = !isFolder;
+        }
+
+        // A checkbox next to an openable federated view was toggled. While one or more are checked,
+        // btnSelect switches to "Copy N Selected" and closing the dialog returns SelectedFedViews
+        // instead of the single-selection properties - see OnSelectClick.
+        private void OnFedViewCheckChanged(object sender, RoutedEventArgs e)
+        {
+            var checkBox = sender as CheckBox;
+            if (!(checkBox?.Tag is FederationWalker.FedView fv)) return;
+
+            if (checkBox.IsChecked == true) _checkedFedViews.Add(fv);
+            else _checkedFedViews.Remove(fv);
+
+            if (_checkedFedViews.Count > 0)
+            {
+                btnSelect.Content = $"Copy {_checkedFedViews.Count} Selected";
+                btnSelect.IsEnabled = true;
+            }
+            else
+            {
+                btnSelect.Content = "Select";
+                RefreshSelectButtonForSingleSelection();
+            }
         }
 
         private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
@@ -324,13 +390,34 @@ namespace FlexView.Client
             if (item != null)
                 return (item.Name ?? string.Empty).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
-            // Federated site-header / read-only child-view nodes carry no Item tag; match their text.
+            // Openable federated views carry a FedView tag - their Header is a StackPanel (checkbox +
+            // text), not a plain string, since the checkbox was added for batch selection.
+            if (node.Tag is FederationWalker.FedView fv)
+            {
+                var text = $"{fv.GroupPath} / {fv.Name}";
+                return text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            // Site headers / non-resolvable child views carry no Tag at all; match their plain-string text.
             var header = node.Header as string;
             return header != null && header.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void OnSelectClick(object sender, RoutedEventArgs e)
         {
+            // Batch mode: one or more checkboxes are checked - return all of them regardless of
+            // whatever row is currently highlighted in the tree.
+            if (_checkedFedViews.Count > 0)
+            {
+                SelectedFedViews = _checkedFedViews.ToList();
+                SelectedFedView = null;
+                SelectedItem = null;
+                SelectedParent = null;
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected {SelectedFedViews.Count} child-site view(s) for batch copy.");
+                DialogResult = true;
+                return;
+            }
+
             var selected = tree.SelectedItem as TreeViewItem;
             if (selected == null) return;
 
