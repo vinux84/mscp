@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Xml.Linq;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
 using VideoOS.Platform.ConfigurationItems;
@@ -42,6 +43,19 @@ namespace FlexView.Client
             public string LayoutIcon;
             public string LayoutViewItemsXml;
             public bool HasLayoutXml;
+
+            // Per-slot content (confirmed against a real system: LayoutViewItems/AddView only carry
+            // grid geometry - camera assignments live separately on ViewItemChildItems, one per pane,
+            // keyed by ViewItemPosition). Only camera slots are captured for now; other view item
+            // types (maps, HTML, plugins) are left as empty panes on copy.
+            public List<FedViewItem> Items = new List<FedViewItem>();
+        }
+
+        // One pane's content, parsed from a ViewItemChildItem's ViewItemDefinitionXml.
+        internal sealed class FedViewItem
+        {
+            public int Position;
+            public Guid? CameraId;
         }
 
         internal sealed class SiteViews
@@ -169,30 +183,32 @@ namespace FlexView.Client
                         // LayoutViewItems only carries grid geometry - AddView recreates the panes but not
                         // camera content (confirmed against a real system: copied views come back with
                         // correct layout, empty slots). Per-slot content lives separately on
-                        // ViewItemChildItems, one per pane, keyed by ViewItemPosition. Dumping these for
-                        // the first several views (not just the first, which may have no camera panes) so
-                        // the real ViewItemDefinitionXml shape - where the CameraId presumably lives - is
-                        // known before writing code to parse and restore it, rather than guessed at.
-                        if (acc.Count <= 5)
+                        // ViewItemChildItems, one per pane, keyed by ViewItemPosition. A camera slot's
+                        // ViewItemDefinitionXml looks like (confirmed from a real dump):
+                        //   <viewitem type="...CameraContentType.CameraViewItem, VideoOS.RemoteClient.Application">
+                        //     <iteminfo cameraid="{guid}" .../>
+                        //   </viewitem>
+                        // Other view item types (maps, HTML, plugins) aren't parsed yet - camera is the
+                        // common case this plugin needs to carry across a federated copy.
+                        try
                         {
-                            try
+                            var children = v.ViewItemChildItems;
+                            if (children != null)
                             {
-                                var children = v.ViewItemChildItems;
-                                log.Info($"[FlexViewFed] [{siteName}] view '{v.Name}' ViewItemChildItems count={children?.Count ?? 0}");
-                                if (children != null)
+                                foreach (var vi in children)
                                 {
-                                    foreach (var vi in children)
-                                    {
-                                        var def = vi?.ViewItemDefinitionXml ?? "";
-                                        var defPreview = def.Length > 500 ? def.Substring(0, 500) + " ...[truncated]" : def;
-                                        log.Info($"[FlexViewFed]   pos={vi?.ViewItemPosition} id={vi?.Id} ViewItemDefinitionXml=\n{defPreview}");
-                                    }
+                                    if (vi == null) continue;
+                                    var camId = ParseCameraId(vi.ViewItemDefinitionXml);
+                                    if (camId != null)
+                                        fv.Items.Add(new FedViewItem { Position = vi.ViewItemPosition, CameraId = camId });
                                 }
                             }
-                            catch (Exception ex)
-                            {
-                                log.Info($"[FlexViewFed] [{siteName}] ViewItemChildItems read failed for '{v.Name}': {ex.Message}");
-                            }
+                            if (acc.Count <= 5)
+                                log.Info($"[FlexViewFed] [{siteName}] view '{v.Name}': {children?.Count ?? 0} view item(s), {fv.Items.Count} camera(s) parsed");
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Info($"[FlexViewFed] [{siteName}] ViewItemChildItems read failed for '{v.Name}': {ex.Message}");
                         }
                     }
                 }
@@ -218,6 +234,26 @@ namespace FlexView.Client
         private static string SafeGet(Func<string> f)
         {
             try { return f() ?? ""; } catch { return ""; }
+        }
+
+        // Extracts the camera GUID from a single view item's definition XML, when it's a camera
+        // slot: <viewitem type="...CameraViewItem..."><iteminfo cameraid="{guid}" ... /></viewitem>.
+        // Returns null for every other view item type (empty, map, HTML, plugin, ...) - those are
+        // left as empty panes on copy rather than guessed at.
+        private static Guid? ParseCameraId(string viewItemDefinitionXml)
+        {
+            if (string.IsNullOrEmpty(viewItemDefinitionXml)) return null;
+            try
+            {
+                var el = XElement.Parse(viewItemDefinitionXml);
+                var type = (string)el.Attribute("type") ?? "";
+                if (type.IndexOf("CameraViewItem", StringComparison.OrdinalIgnoreCase) < 0) return null;
+
+                var camIdStr = (string)el.Element("iteminfo")?.Attribute("cameraid");
+                if (Guid.TryParse(camIdStr, out var camId) && camId != Guid.Empty) return camId;
+            }
+            catch { }
+            return null;
         }
 
         // Finds a ViewGroup config object anywhere under a ViewGroupFolder tree by matching its Id,

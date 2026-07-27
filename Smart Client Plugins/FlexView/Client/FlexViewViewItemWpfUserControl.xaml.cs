@@ -1170,9 +1170,16 @@ namespace FlexView.Client
                     fv.LayoutViewItemsXml);
                 WaitForServerTask(task, "AddView");
 
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{dlg.SelectedFolder.Name}' as '{dlg.ViewName}'.");
+                int restored = 0, attempted = fv.Items.Count;
+                if (attempted > 0)
+                    restored = RestoreCameraSlots(masterFqid.ServerId, task.Path, fv.Items);
+
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{dlg.SelectedFolder.Name}' as '{dlg.ViewName}' ({restored}/{attempted} camera(s) restored).");
+                var cameraNote = attempted == 0 ? "" : restored == attempted
+                    ? $" All {attempted} camera(s) were carried over."
+                    : $" {restored} of {attempted} camera(s) were carried over - see MIPLog for the rest.";
                 MessageDialog.ShowSuccess("View Copied",
-                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{dlg.SelectedFolder.Name}\" as \"{dlg.ViewName}\".",
+                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{dlg.SelectedFolder.Name}\" as \"{dlg.ViewName}\".{cameraNote}",
                     Window.GetWindow(this));
             }
             catch (Exception ex)
@@ -1180,6 +1187,67 @@ namespace FlexView.Client
                 FlexViewDefinition.Log.Info($"[FlexViewFed] CopyFederatedViewToLocal failed: {ex}");
                 MessageDialog.ShowError("Copy Failed", $"Failed to copy the view:\n{ex.Message}", Window.GetWindow(this));
             }
+        }
+
+        // Restores camera slots onto the view AddView just created. The destination is always local
+        // (this site), so - unlike the source - Configuration.Instance.GetItem resolves it fine once
+        // we know its Id: ServerTask.Path (from AddView) is the new view's config-API path, used to
+        // read its raw View object and pull out the Id needed to rebuild a client FQID. From there
+        // it's the exact same InsertBuiltinViewItem pipeline the same-site copy already uses.
+        // Per-slot failures are logged and skipped rather than failing the whole copy - the view and
+        // its layout already exist at this point regardless.
+        private static int RestoreCameraSlots(ServerId masterServerId, string newViewPath, List<FederationWalker.FedViewItem> items)
+        {
+            if (string.IsNullOrEmpty(newViewPath)) return 0;
+
+            VideoOS.Platform.ConfigurationItems.View newConfigView;
+            try { newConfigView = new VideoOS.Platform.ConfigurationItems.View(masterServerId, newViewPath); }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Could not read the new view at '{newViewPath}': {ex.Message}");
+                return 0;
+            }
+
+            if (!Guid.TryParse(newConfigView.Id, out var newViewObjectId))
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] New view Id '{newConfigView.Id}' is not a GUID - cannot restore camera content.");
+                return 0;
+            }
+
+            var newViewFqid = new FQID(masterServerId, Guid.Empty, newViewObjectId, FolderType.No, Kind.View);
+            var newClientItem = Configuration.Instance.GetItem(newViewFqid) as ViewAndLayoutItem;
+            if (newClientItem == null)
+            {
+                FlexViewDefinition.Log.Info("[FlexViewFed] Could not resolve the newly created view via the client session - camera content not restored.");
+                return 0;
+            }
+
+            int restored = 0;
+            foreach (var item in items)
+            {
+                if (item.CameraId == null) continue;
+                try
+                {
+                    newClientItem.InsertBuiltinViewItem(item.Position, ViewAndLayoutItem.CameraBuiltinId,
+                        new Dictionary<string, string> { ["CameraId"] = item.CameraId.Value.ToString() });
+                    restored++;
+                }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] slot[{item.Position}]: restore failed for camera {item.CameraId}: {ex.Message}");
+                }
+            }
+
+            if (restored > 0)
+            {
+                try { newClientItem.Save(); }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Save after camera restore failed: {ex.Message}");
+                    return 0;
+                }
+            }
+            return restored;
         }
 
         // AddView/AddViewGroup run as a server-side task that may not be finished when the call
