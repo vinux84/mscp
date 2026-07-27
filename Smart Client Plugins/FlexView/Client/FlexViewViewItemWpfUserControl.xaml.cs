@@ -1178,7 +1178,7 @@ namespace FlexView.Client
 
                 int restored = 0, attempted = prep.CameraItems.Count;
                 if (attempted > 0)
-                    restored = RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
+                    restored = await RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
 
                 FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{destFolder.Name}' as '{newName}' ({restored}/{attempted} camera(s) restored).");
                 var cameraNote = attempted == 0 ? "" : restored == attempted
@@ -1232,12 +1232,19 @@ namespace FlexView.Client
         // its layout already exist at this point regardless.
         //
         // MUST be called on Smart Client's own UI thread. Confirmed against a real run: calling this
-        // from a background thread (it used to be inside the same Task.Run as PrepareFederatedCopy)
-        // throws "The calling thread cannot access this object because a different thread owns it" on
-        // Save - the ViewAndLayoutItem returned by Configuration.Instance.GetItem is a client-session
-        // object with thread affinity, unlike the raw ConfigurationItems.* objects used elsewhere in
-        // this file, which have no such restriction.
-        private static int RestoreCameraSlots(ServerId masterServerId, string newViewPath, List<FederationWalker.FedViewItem> items)
+        // from a background thread throws "The calling thread cannot access this object because a
+        // different thread owns it" on Save - the ViewAndLayoutItem returned by Configuration.Instance
+        // .GetItem is a client-session object with thread affinity, unlike the raw ConfigurationItems.*
+        // objects used elsewhere in this file, which have no such restriction.
+        //
+        // Uses await Task.Delay (not Thread.Sleep) between retry attempts so the UI stays responsive
+        // while waiting - confirmed against a real system that the client cache can take 45+ seconds
+        // to notice a view created through the raw config API side channel, and each GetItem attempt
+        // itself (not just the delay between attempts) can take 2-3 seconds since it's a real network
+        // call that must run on this thread. Delay-based yielding can't eliminate that per-attempt
+        // cost, but it does mean Smart Client's message pump isn't dead for the whole wait - just
+        // briefly busy during each individual attempt.
+        private static async Task<int> RestoreCameraSlots(ServerId masterServerId, string newViewPath, List<FederationWalker.FedViewItem> items)
         {
             if (string.IsNullOrEmpty(newViewPath)) return 0;
 
@@ -1263,14 +1270,17 @@ namespace FlexView.Client
             // environment's own propagation out with a bounded retry.
             var newViewFqid = new FQID(masterServerId, Guid.Empty, newViewObjectId, FolderType.No, Kind.View);
             ViewAndLayoutItem newClientItem = null;
-            for (int attempt = 1; attempt <= 15 && newClientItem == null; attempt++)
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            int attempt = 0;
+            while (newClientItem == null && DateTime.UtcNow < deadline)
             {
-                if (attempt > 1) System.Threading.Thread.Sleep(500);
+                attempt++;
+                if (attempt > 1) await Task.Delay(500);
                 newClientItem = Configuration.Instance.GetItem(newViewFqid) as ViewAndLayoutItem;
             }
             if (newClientItem == null)
             {
-                FlexViewDefinition.Log.Info("[FlexViewFed] Could not resolve the newly created view via the client session after retrying - camera content not restored.");
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Could not resolve the newly created view via the client session after {attempt} attempt(s) - camera content not restored.");
                 return 0;
             }
 
@@ -1290,13 +1300,17 @@ namespace FlexView.Client
                 }
             }
 
+            // Confirmed against a real run: InsertBuiltinViewItem's changes stuck (the resulting view
+            // genuinely had working cameras) even on a run where this Save() call itself failed (it was
+            // called from the wrong thread, before this method was fixed to always run on the UI
+            // thread). So a Save() failure here is logged but does not roll the already-successful
+            // restored count back to 0 - that undercounted a copy that had actually worked.
             if (restored > 0)
             {
                 try { newClientItem.Save(); }
                 catch (Exception ex)
                 {
-                    FlexViewDefinition.Log.Info($"[FlexViewFed] Save after camera restore failed: {ex.Message}");
-                    return 0;
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Save after camera restore failed (restored slots may already be persisted regardless): {ex.Message}");
                 }
             }
             return restored;
