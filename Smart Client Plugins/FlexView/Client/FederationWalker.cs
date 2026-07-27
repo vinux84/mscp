@@ -165,6 +165,35 @@ namespace FlexView.Client
                             var preview = xml.Length > 800 ? xml.Substring(0, 800) + " ...[truncated]" : xml;
                             log.Info($"[FlexViewFed] [{siteName}] sample view '{v.Name}' layoutType={fv.LayoutType} LayoutViewItems=\n{preview}");
                         }
+
+                        // LayoutViewItems only carries grid geometry - AddView recreates the panes but not
+                        // camera content (confirmed against a real system: copied views come back with
+                        // correct layout, empty slots). Per-slot content lives separately on
+                        // ViewItemChildItems, one per pane, keyed by ViewItemPosition. Dumping these for
+                        // the first several views (not just the first, which may have no camera panes) so
+                        // the real ViewItemDefinitionXml shape - where the CameraId presumably lives - is
+                        // known before writing code to parse and restore it, rather than guessed at.
+                        if (acc.Count <= 5)
+                        {
+                            try
+                            {
+                                var children = v.ViewItemChildItems;
+                                log.Info($"[FlexViewFed] [{siteName}] view '{v.Name}' ViewItemChildItems count={children?.Count ?? 0}");
+                                if (children != null)
+                                {
+                                    foreach (var vi in children)
+                                    {
+                                        var def = vi?.ViewItemDefinitionXml ?? "";
+                                        var defPreview = def.Length > 500 ? def.Substring(0, 500) + " ...[truncated]" : def;
+                                        log.Info($"[FlexViewFed]   pos={vi?.ViewItemPosition} id={vi?.Id} ViewItemDefinitionXml=\n{defPreview}");
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                log.Info($"[FlexViewFed] [{siteName}] ViewItemChildItems read failed for '{v.Name}': {ex.Message}");
+                            }
+                        }
                     }
                 }
             }
