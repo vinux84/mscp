@@ -1138,17 +1138,23 @@ namespace FlexView.Client
         // ViewSync's README documents for View Groups). The destination write goes through the same
         // ConfigurationItems API (ViewGroup.ViewFolder.AddView), just targeted at this, locally
         // connected/writable site instead of the source.
-        private class CopyResult
+
+        // Result of the background phase: everything RestoreCameraSlots needs, plus what's needed to
+        // report the outcome. Deliberately carries no ViewAndLayoutItem/client-session object across
+        // the Task.Run boundary - see the thread-affinity note on RestoreCameraSlots below.
+        private class PreparedCopy
         {
-            public int Restored;
-            public int Attempted;
+            public string NewViewPath;
+            public ServerId MasterServerId;
+            public List<FederationWalker.FedViewItem> CameraItems;
         }
 
-        // AddView + WaitForServerTask + the camera-restore retry can together take anywhere from a
-        // few seconds to close to a minute against a real system (confirmed: network round-trips per
-        // poll, not just the sleep between them, add up). All of that used to run directly on the UI
-        // thread and froze Smart Client for the whole duration - it's offloaded to a background
-        // thread here; only the two dialogs (folder/name prompt, and the final result) touch the UI.
+        // AddView + WaitForServerTask + reading the source's camera items are all raw config-API
+        // calls (VideoOS.Platform.ConfigurationItems) - thread-agnostic, confirmed safe on a
+        // background thread. Restoring those cameras onto the new view is NOT: that touches a
+        // ViewAndLayoutItem, a client-session object, on the UI thread only (see RestoreCameraSlots).
+        // So the slow network-bound part runs via Task.Run, and only the final restore step - bounded
+        // to a few seconds by RestoreCameraSlots' own retry cap - runs on the UI thread.
         private async void CopyFederatedViewToLocal(FederationWalker.FedView fv)
         {
             if (fv == null || !fv.HasLayoutXml)
@@ -1168,12 +1174,16 @@ namespace FlexView.Client
 
             try
             {
-                var result = await Task.Run(() => DoCopyFederatedView(fv, destFolder, newName));
+                var prep = await Task.Run(() => PrepareFederatedCopy(fv, destFolder, newName));
 
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{destFolder.Name}' as '{newName}' ({result.Restored}/{result.Attempted} camera(s) restored).");
-                var cameraNote = result.Attempted == 0 ? "" : result.Restored == result.Attempted
-                    ? $" All {result.Attempted} camera(s) were carried over."
-                    : $" {result.Restored} of {result.Attempted} camera(s) were carried over - see MIPLog for the rest.";
+                int restored = 0, attempted = prep.CameraItems.Count;
+                if (attempted > 0)
+                    restored = RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
+
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{destFolder.Name}' as '{newName}' ({restored}/{attempted} camera(s) restored).");
+                var cameraNote = attempted == 0 ? "" : restored == attempted
+                    ? $" All {attempted} camera(s) were carried over."
+                    : $" {restored} of {attempted} camera(s) were carried over - see MIPLog for the rest.";
                 MessageDialog.ShowSuccess("View Copied",
                     $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{destFolder.Name}\" as \"{newName}\".{cameraNote}",
                     Window.GetWindow(this));
@@ -1185,8 +1195,8 @@ namespace FlexView.Client
             }
         }
 
-        // The actual copy, run on a background thread - no UI/Dispatcher access in here.
-        private static CopyResult DoCopyFederatedView(FederationWalker.FedView fv, Item destFolder, string newName)
+        // Background-thread phase: raw config-API only, no client-session objects touched.
+        private static PreparedCopy PrepareFederatedCopy(FederationWalker.FedView fv, Item destFolder, string newName)
         {
             var masterFqid = EnvironmentManager.Instance.MasterSite;
             if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
@@ -1205,11 +1215,12 @@ namespace FlexView.Client
                 fv.LayoutViewItemsXml);
             WaitForServerTask(task, "AddView");
 
-            var cameraItems = FederationWalker.ReadCameraItems(fv);
-            var result = new CopyResult { Attempted = cameraItems.Count };
-            if (result.Attempted > 0)
-                result.Restored = RestoreCameraSlots(masterFqid.ServerId, task.Path, cameraItems);
-            return result;
+            return new PreparedCopy
+            {
+                NewViewPath = task.Path,
+                MasterServerId = masterFqid.ServerId,
+                CameraItems = FederationWalker.ReadCameraItems(fv)
+            };
         }
 
         // Restores camera slots onto the view AddView just created. The destination is always local
@@ -1219,6 +1230,13 @@ namespace FlexView.Client
         // it's the exact same InsertBuiltinViewItem pipeline the same-site copy already uses.
         // Per-slot failures are logged and skipped rather than failing the whole copy - the view and
         // its layout already exist at this point regardless.
+        //
+        // MUST be called on Smart Client's own UI thread. Confirmed against a real run: calling this
+        // from a background thread (it used to be inside the same Task.Run as PrepareFederatedCopy)
+        // throws "The calling thread cannot access this object because a different thread owns it" on
+        // Save - the ViewAndLayoutItem returned by Configuration.Instance.GetItem is a client-session
+        // object with thread affinity, unlike the raw ConfigurationItems.* objects used elsewhere in
+        // this file, which have no such restriction.
         private static int RestoreCameraSlots(ServerId masterServerId, string newViewPath, List<FederationWalker.FedViewItem> items)
         {
             if (string.IsNullOrEmpty(newViewPath)) return 0;
