@@ -1155,13 +1155,14 @@ namespace FlexView.Client
             try
             {
                 var viewGroup = new ViewGroup(dlg.SelectedFolder.FQID);
-                viewGroup.ViewFolder.AddView(
+                var task = viewGroup.ViewFolder.AddView(
                     dlg.ViewName,
                     fv.Shortcut ?? "",
                     fv.LayoutType ?? "",
                     fv.LayoutCustomId ?? "",
                     fv.LayoutIcon ?? "",
                     fv.LayoutViewItemsXml);
+                WaitForServerTask(task, "AddView");
 
                 FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{dlg.SelectedFolder.Name}' as '{dlg.ViewName}'.");
                 MessageDialog.ShowSuccess("View Copied",
@@ -1173,6 +1174,25 @@ namespace FlexView.Client
                 FlexViewDefinition.Log.Info($"[FlexViewFed] CopyFederatedViewToLocal failed: {ex}");
                 MessageDialog.ShowError("Copy Failed", $"Failed to copy the view:\n{ex.Message}", Window.GetWindow(this));
             }
+        }
+
+        // AddView/AddViewGroup run as a server-side task that may not be finished when the call
+        // returns (ServerTask.Progress < 100) - the SDK docs say to poll UpdateState() until it
+        // completes. Without this, a server-side failure (e.g. a duplicate name) would otherwise be
+        // reported back as a success.
+        private static void WaitForServerTask(VideoOS.Platform.ConfigurationItems.ServerTask task, string what)
+        {
+            if (task == null) throw new InvalidOperationException($"{what}: server returned no task.");
+
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (task.Progress < 100 && task.State != VideoOS.Platform.ConfigurationItems.StateEnum.Error && DateTime.UtcNow < deadline)
+            {
+                System.Threading.Thread.Sleep(200);
+                task.UpdateState();
+            }
+
+            if (task.State == VideoOS.Platform.ConfigurationItems.StateEnum.Error)
+                throw new InvalidOperationException($"{what} failed: {task.ErrorText ?? task.ErrorCode ?? "unknown error"}");
         }
 
         private void TryReadSlotLabels(ViewAndLayoutItem view)
