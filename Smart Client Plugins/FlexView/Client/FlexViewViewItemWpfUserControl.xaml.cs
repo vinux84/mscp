@@ -9,6 +9,7 @@ using System.Windows.Shapes;
 using FlexView.Models;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
+using VideoOS.Platform.ConfigurationItems;
 using SdkRectangle = System.Drawing.Rectangle;
 
 namespace FlexView.Client
@@ -71,11 +72,6 @@ namespace FlexView.Client
 
         // Save target
         private Item _targetFolder;
-
-        // TEST (federated views): when a view is opened from a child site it is loaded as a copy,
-        // never edited in place. This holds the source view so its slot content (camera assignments,
-        // plugin view items) is carried into the new view when saved into a parent folder.
-        private ViewAndLayoutItem _crossSiteSource;
 
         public FlexViewViewItemWpfUserControl()
         {
@@ -1110,7 +1106,6 @@ namespace FlexView.Client
             _isEditMode = true;
             _editingView = view;
             _editingParent = parent;
-            _crossSiteSource = null;   // editing a real same-site view, not a cross-site copy
             _selectedPane = null;
             _hoveredPane = null;
 
@@ -1135,88 +1130,48 @@ namespace FlexView.Client
             UpdateStatus();
         }
 
-        // TEST (federated views): resolve a child-site view (read from its Management Server config)
-        // back to a client ViewAndLayoutItem via its rebuilt FQID, so the existing open/save pipeline
-        // can consume it. Returns null (logged) if the federated session cannot resolve the item -
-        // that result tells us whether this approach works before we fall back to parsing the raw
-        // LayoutViewItems XML.
-        private ViewAndLayoutItem ResolveFederatedView(FederationWalker.FedView fv)
+        // Copies a child-site view straight from its captured Management Server configuration (name,
+        // layout type, and the raw LayoutViewItems XML - the same wire format Get/AddView both read
+        // and write) into a folder on this site. This never routes through Configuration.Instance
+        // .GetItem for the source view - that lookup only resolves items the client session actually
+        // federates, and Views are not part of MFA's federated resource model (same limitation
+        // ViewSync's README documents for View Groups). The destination write goes through the same
+        // ConfigurationItems API (ViewGroup.ViewFolder.AddView), just targeted at this, locally
+        // connected/writable site instead of the source.
+        private void CopyFederatedViewToLocal(FederationWalker.FedView fv)
         {
+            if (fv == null || !fv.HasLayoutXml)
+            {
+                MessageDialog.ShowError("Open Failed",
+                    "This view's layout could not be read from its site's configuration. See MIPLog for details.",
+                    Window.GetWindow(this));
+                return;
+            }
+
+            var dlg = new SaveViewWindow(fv.Name, null);
+            dlg.Owner = Application.Current.MainWindow;
+            if (dlg.ShowDialog() != true) return;
+
             try
             {
-                if (fv?.Fqid == null)
-                {
-                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: '{fv?.Name}' has no rebuilt FQID.");
-                    return null;
-                }
+                var viewGroup = new ViewGroup(dlg.SelectedFolder.FQID);
+                viewGroup.ViewFolder.AddView(
+                    dlg.ViewName,
+                    fv.Shortcut ?? "",
+                    fv.LayoutType ?? "",
+                    fv.LayoutCustomId ?? "",
+                    fv.LayoutIcon ?? "",
+                    fv.LayoutViewItemsXml);
 
-                var item = Configuration.Instance.GetItem(fv.Fqid);
-                if (item == null)
-                {
-                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: GetItem returned null for '{fv.Name}' (site '{fv.SiteName}').");
-                    return null;
-                }
-
-                var view = item as ViewAndLayoutItem;
-                if (view == null)
-                {
-                    FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve: item '{item.Name}' is {item.GetType().Name}, not ViewAndLayoutItem.");
-                    return null;
-                }
-
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve OK: '{view.Name}' from site '{fv.SiteName}'.");
-                return view;
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{dlg.SelectedFolder.Name}' as '{dlg.ViewName}'.");
+                MessageDialog.ShowSuccess("View Copied",
+                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{dlg.SelectedFolder.Name}\" as \"{dlg.ViewName}\".",
+                    Window.GetWindow(this));
             }
             catch (Exception ex)
             {
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Resolve failed for '{fv?.Name}': {ex.Message}");
-                return null;
-            }
-        }
-
-        // TEST (federated views): load a view that lives on a child site as an unsaved copy. We never
-        // edit it in place (the child site is read-only through this master session); instead the
-        // panes are loaded fresh so the next Save prompts for a destination folder on the parent
-        // (master). Reading view.Layout / GetChildren here is the crux of the test - if the child
-        // view's layout and slot content come back through the federated session, the copy is
-        // faithful; the results are logged either way.
-        private void LoadCrossSiteViewAsCopy(ViewAndLayoutItem view)
-        {
-            try
-            {
-                var layout = view.Layout;
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Opening cross-site view '{view.Name}': layout slots={(layout?.Length ?? -1)}");
-
-                if (layout == null || layout.Length == 0)
-                {
-                    MessageDialog.ShowError("Open Failed",
-                        "This view is on another site and its layout could not be read through the current session.",
-                        Window.GetWindow(this));
-                    return;
-                }
-
-                LoadFromSdkLayout(layout);
-                TryReadSlotLabels(view);
-
-                // New, unsaved copy: not edit mode, no in-place target. The source is kept so Save
-                // carries its camera / plugin slot content into the new view on the parent.
-                _crossSiteSource = view;
-                _isEditMode = false;
-                _editingView = null;
-                _editingParent = null;
-                _targetFolder = null;
-                _isDirty = true;
-                saveAsButton.Visibility = Visibility.Collapsed;
-                viewNameLabel.Text = view.Name + " (copy from site)";
-
-                RedrawCanvas();
-                UpdateStatus();
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Cross-site view loaded as copy: panes={_panes.Count}. Use Save to store it in a parent folder.");
-            }
-            catch (Exception ex)
-            {
-                FlexViewDefinition.Log.Info($"[FlexViewFed] LoadCrossSiteViewAsCopy failed: {ex}");
-                MessageDialog.ShowError("Open Failed", $"Failed to open the cross-site view:\n{ex.Message}", Window.GetWindow(this));
+                FlexViewDefinition.Log.Info($"[FlexViewFed] CopyFederatedViewToLocal failed: {ex}");
+                MessageDialog.ShowError("Copy Failed", $"Failed to copy the view:\n{ex.Message}", Window.GetWindow(this));
             }
         }
 
@@ -1318,7 +1273,6 @@ namespace FlexView.Client
             _editingView = null;
             _editingParent = null;
             _targetFolder = null;
-            _crossSiteSource = null;
             _isDirty = false;
             saveAsButton.Visibility = Visibility.Collapsed;
             viewNameLabel.Text = "";
@@ -1339,23 +1293,17 @@ namespace FlexView.Client
 
                 if (!proceed) return;
 
-                // TEST (federated views): browse views across all sites (master + federated children).
+                // Browse views across all sites (master + federated children).
                 var browser = new ViewBrowserWindow(BrowseMode.SelectView, federated: true);
                 browser.Owner = Application.Current.MainWindow;
                 if (browser.ShowDialog() != true) return;
 
-                // Child-site view: resolve its rebuilt FQID to a ViewAndLayoutItem, then load as a copy.
+                // Child-site view: copy its captured layout XML straight into a folder on this site,
+                // rather than trying to resolve it to a live ViewAndLayoutItem - Views are not part of
+                // MFA's federated client-session model, so that resolve always returns null.
                 if (browser.SelectedFedView != null)
                 {
-                    var childView = ResolveFederatedView(browser.SelectedFedView);
-                    if (childView == null)
-                    {
-                        MessageDialog.ShowError("Open Failed",
-                            "This view is on another site and could not be resolved through the current session. See MIPLog for details.",
-                            Window.GetWindow(this));
-                        return;
-                    }
-                    LoadCrossSiteViewAsCopy(childView);
+                    CopyFederatedViewToLocal(browser.SelectedFedView);
                     return;
                 }
 
@@ -1369,10 +1317,7 @@ namespace FlexView.Client
                     return;
                 }
 
-                if (browser.SelectedIsCrossSite)
-                    LoadCrossSiteViewAsCopy(view);
-                else
-                    LoadViewForEditing(view, browser.SelectedParent);
+                LoadViewForEditing(view, browser.SelectedParent);
             }
             catch (Exception ex)
             {
@@ -1413,28 +1358,12 @@ namespace FlexView.Client
             }
             else
             {
-                // TEST (federated views): a copy opened from a child site carries its source name and
-                // slot content (cameras / plugin view items) into the new view saved on the parent.
-                // Reading the source's slot children can fail for a federated item - degrade to a
-                // layout-only save rather than aborting.
-                string defaultName = _crossSiteSource?.Name;
-                List<SlotSnapshot> slotContent = null;
-                if (_crossSiteSource != null)
-                {
-                    try { slotContent = SnapshotSlotContent(_crossSiteSource); }
-                    catch (Exception ex)
-                    {
-                        FlexViewDefinition.Log.Info($"[FlexViewFed] SnapshotSlotContent failed for cross-site source: {ex.Message} - saving layout only.");
-                    }
-                }
-
-                var dlg = new SaveViewWindow(defaultName, _targetFolder);
+                var dlg = new SaveViewWindow(null, _targetFolder);
                 dlg.Owner = Application.Current.MainWindow;
                 if (dlg.ShowDialog() == true)
                 {
                     _targetFolder = dlg.SelectedFolder;
-                    var saved = SaveNewView(dlg.ViewName, dlg.SelectedFolder, slotContent);
-                    if (saved != null) _crossSiteSource = null;
+                    SaveNewView(dlg.ViewName, dlg.SelectedFolder);
                 }
             }
         }

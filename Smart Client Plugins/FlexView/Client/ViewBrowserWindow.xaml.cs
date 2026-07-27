@@ -20,13 +20,8 @@ namespace FlexView.Client
         public Item SelectedItem { get; private set; }
         public Item SelectedParent { get; private set; }
 
-        // TEST (federated views): true when the selected view lives on a different site than the
-        // master we are logged into. The caller then loads it as a new copy so it can be saved into
-        // a parent (master) folder rather than written back to the child site.
-        public bool SelectedIsCrossSite { get; private set; }
-
-        // TEST (federated views): set when the selection is a child-site view read from the
-        // Management Server config (rather than a master client Item). Carries the rebuilt FQID.
+        // Set when the selection is a child-site view read from the Management Server config
+        // (rather than a master client Item). Carries its captured layout XML for copying.
         internal FederationWalker.FedView SelectedFedView { get; private set; }
 
         public ViewBrowserWindow(BrowseMode mode) : this(mode, false) { }
@@ -122,13 +117,13 @@ namespace FlexView.Client
                 }
                 else
                 {
-                    // Child site: views read from the Management Server config. Each carries a rebuilt
-                    // FQID so it can be resolved to a ViewAndLayoutItem and opened as a copy, then
-                    // saved into a parent folder. Views whose FQID could not be rebuilt are shown but
-                    // not selectable.
+                    // Child site: views read from the Management Server config, each carrying its own
+                    // captured layout XML so it can be copied into a folder on this site without ever
+                    // needing a client-side handle to the source view. Views whose layout XML could
+                    // not be read are shown but not selectable.
                     foreach (var fv in sv.FedViews)
                     {
-                        bool openable = fv.Fqid != null;
+                        bool openable = fv.HasLayoutXml;
                         header.Items.Add(new TreeViewItem
                         {
                             Header = $"\U0001F4CB {fv.GroupPath} / {fv.Name}" + (openable ? "" : "   [not resolvable]"),
@@ -272,14 +267,13 @@ namespace FlexView.Client
             var selected = tree.SelectedItem as TreeViewItem;
             if (selected == null) return;
 
-            // TEST (federated views): a child-site view carries a FedView tag, not a client Item.
+            // A child-site view carries a FedView tag, not a client Item.
             if (selected.Tag is FederationWalker.FedView fv)
             {
                 SelectedFedView = fv;
                 SelectedItem = null;
                 SelectedParent = null;
-                SelectedIsCrossSite = true;
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected child-site view '{fv.Name}' on '{fv.SiteName}' (fqid={(fv.Fqid != null)})");
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected child-site view '{fv.Name}' on '{fv.SiteName}'");
                 DialogResult = true;
                 return;
             }
@@ -290,19 +284,6 @@ namespace FlexView.Client
             var parentNode = selected.Parent as TreeViewItem;
             if (parentNode != null)
                 SelectedParent = parentNode.Tag as Item;
-
-            // TEST (federated views): flag selections that live on a child site so the caller loads
-            // them as a copy targeted at a parent folder.
-            SelectedIsCrossSite = false;
-            try
-            {
-                var masterSid = EnvironmentManager.Instance.MasterSite?.ServerId?.Id;
-                var selSid = SelectedItem?.FQID?.ServerId?.Id;
-                if (masterSid != null && selSid != null && masterSid != selSid)
-                    SelectedIsCrossSite = true;
-                FlexViewDefinition.Log.Info($"[FlexViewFed] Selected '{SelectedItem?.Name}' kind={SelectedItem?.FQID?.Kind} crossSite={SelectedIsCrossSite}");
-            }
-            catch { }
 
             DialogResult = true;
         }

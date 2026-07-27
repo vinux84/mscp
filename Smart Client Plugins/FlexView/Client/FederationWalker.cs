@@ -6,9 +6,8 @@ using VideoOS.Platform.ConfigurationItems;
 
 namespace FlexView.Client
 {
-    // TEST / DIAGNOSTIC (federated views): reads views from the master site and, in a Milestone
-    // Federated Architecture, from its child sites too - straight off each site's Management Server
-    // configuration.
+    // Reads views from the master site and, in a Milestone Federated Architecture, from its child
+    // sites too - straight off each site's Management Server configuration.
     //
     // Views persist on the Management Server (ViewGroupFolder -> ViewGroup -> ViewFolder -> View),
     // exactly like Recording Servers do (RecordingServerFolder -> RecordingServer). So the same
@@ -17,12 +16,20 @@ namespace FlexView.Client
     // configuration-plane read - it does NOT depend on a client session, so it is not subject to the
     // "Cannot work with View Groups in standalone SDK" limitation that ClientControl hits.
     //
+    // A child-site view is never resolved back to a live ViewAndLayoutItem (Configuration.Instance
+    // .GetItem always returns null for it - Views are not part of MFA's federated client-session
+    // model, only devices/cameras/alarms/access are). Instead the raw LayoutViewItems XML and the
+    // handful of other fields ViewFolder.AddView needs are captured here directly from the
+    // configuration-plane View object, so the caller can recreate the view via that same config API
+    // on a site it can write to, without ever needing a client-side handle to the source view.
+    //
     // Everything is logged with the [FlexViewFed] prefix (including a sample view's LayoutViewItems
-    // XML) so a customer test run can be diagnosed - and so we capture the layout format needed to
-    // recreate a child-site view on the parent.
+    // XML) so a customer test run can be diagnosed.
     internal static class FederationWalker
     {
-        // A view read from a site's Management Server configuration.
+        // A view read from a site's Management Server configuration - enough to recreate it
+        // elsewhere via ViewFolder.AddView(name, shortcut, viewLayoutType, layoutCustomId,
+        // layoutIcon, layoutViewItems).
         internal sealed class FedView
         {
             public string SiteName;
@@ -30,10 +37,11 @@ namespace FlexView.Client
             public string Name;
             public string Id;
             public string LayoutType;
+            public string Shortcut;
+            public string LayoutCustomId;
+            public string LayoutIcon;
+            public string LayoutViewItemsXml;
             public bool HasLayoutXml;
-            // Client FQID rebuilt from the view's ServerId + Id, so the view can be resolved back to a
-            // ViewAndLayoutItem via Configuration.Instance.GetItem and opened with the normal pipeline.
-            public FQID Fqid;
         }
 
         internal sealed class SiteViews
@@ -143,8 +151,11 @@ namespace FlexView.Client
                             Name = v.Name,
                             Id = v.Id,
                             LayoutType = SafeGet(() => v.ViewLayoutType),
-                            HasLayoutXml = !string.IsNullOrEmpty(xml),
-                            Fqid = BuildViewFqid(v)
+                            Shortcut = SafeGet(() => v.Shortcut),
+                            LayoutCustomId = SafeGet(() => v.LayoutCustomId),
+                            LayoutIcon = SafeGet(() => v.LayoutIcon),
+                            LayoutViewItemsXml = xml,
+                            HasLayoutXml = !string.IsNullOrEmpty(xml)
                         };
                         acc.Add(fv);
 
@@ -178,24 +189,6 @@ namespace FlexView.Client
         private static string SafeGet(Func<string> f)
         {
             try { return f() ?? ""; } catch { return ""; }
-        }
-
-        // Rebuild a client FQID for a view from its config ServerId + Id, so it can be resolved back
-        // to a ViewAndLayoutItem with Configuration.Instance.GetItem - the same trick used to resolve
-        // a camera FQID elsewhere. Returns null if the id/server is not usable.
-        private static FQID BuildViewFqid(VideoOS.Platform.ConfigurationItems.View v)
-        {
-            try
-            {
-                if (v?.ServerId == null || string.IsNullOrEmpty(v.Id)) return null;
-                if (!Guid.TryParse(v.Id, out var objId)) return null;
-                return new FQID(v.ServerId, Guid.Empty, objId, FolderType.No, Kind.View);
-            }
-            catch (Exception ex)
-            {
-                FlexViewDefinition.Log.Info($"[FlexViewFed] BuildViewFqid failed for '{v?.Name}': {ex.Message}");
-                return null;
-            }
         }
 
         // ── Federated site enumeration (proven pattern from System Status) ─────────────────────
