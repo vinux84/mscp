@@ -1214,11 +1214,22 @@ namespace FlexView.Client
                 return 0;
             }
 
+            // The client session's own item cache for built-in kinds (View included) doesn't see a
+            // just-created item immediately - it was written through the raw config API, a side
+            // channel the client cache isn't notified about synchronously. Configuration.RefreshConfiguration
+            // explicitly does not apply here (SDK docs: "Only works for plug-in defined configurations
+            // ... built-in item types ... cannot be refreshed"), so the only option is to wait the
+            // environment's own propagation out with a bounded retry.
             var newViewFqid = new FQID(masterServerId, Guid.Empty, newViewObjectId, FolderType.No, Kind.View);
-            var newClientItem = Configuration.Instance.GetItem(newViewFqid) as ViewAndLayoutItem;
+            ViewAndLayoutItem newClientItem = null;
+            for (int attempt = 1; attempt <= 15 && newClientItem == null; attempt++)
+            {
+                if (attempt > 1) System.Threading.Thread.Sleep(500);
+                newClientItem = Configuration.Instance.GetItem(newViewFqid) as ViewAndLayoutItem;
+            }
             if (newClientItem == null)
             {
-                FlexViewDefinition.Log.Info("[FlexViewFed] Could not resolve the newly created view via the client session - camera content not restored.");
+                FlexViewDefinition.Log.Info("[FlexViewFed] Could not resolve the newly created view via the client session after retrying - camera content not restored.");
                 return 0;
             }
 
