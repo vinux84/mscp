@@ -1,6 +1,13 @@
 name: PR Build
 
-# Gate every pull request on a clean build of all plugins and the installer.
+# Gate every pull request on a clean build of the plugins it touches.
+#
+# A change confined to one plugin builds that plugin only - the other 25 are not
+# compiled and the installer is skipped. Anything shared (CommunitySDK, the
+# Directory.Build files, plugins.json, installer/, .github/workflows/) falls back
+# to the full matrix plus the installer, and build-release.yml always builds
+# everything, so nothing ships unvalidated.
+#
 # Artifacts are uploaded for inspection but expire after 1 day.
 on:
   pull_request:
@@ -41,7 +48,13 @@ jobs:
               - '!**/*.md'
               - '!mkdocs.yml'
 
-  # Generate the build matrix from plugins.json
+  # Generate the build matrix from plugins.json, restricted to the plugins this
+  # PR actually touches.
+  #
+  # The selection is derived from plugins.json rather than a hand-written list of
+  # path filters, so it covers every plugin automatically - including one added
+  # later by someone who never edits this file. A duplicated list would silently
+  # skip an unregistered plugin, which is the one failure mode worth designing out.
   setup:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -49,15 +62,69 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
       names: ${{ steps.gen.outputs.names }}
+      count: ${{ steps.gen.outputs.count }}
+      full: ${{ steps.gen.outputs.full }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Needed so the base commit is present for the diff below.
+          fetch-depth: 0
 
       - id: gen
         shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           $plugins = Get-Content plugins.json -Raw | ConvertFrom-Json
           $include = @()
           $names = @()
+
+          $changed = @(git diff --name-only "$env:BASE_SHA" HEAD)
+          Write-Host "Changed files ($($changed.Count)):"
+          $changed | ForEach-Object { Write-Host "  $_" }
+
+          # Anything shared forces the whole matrix. CommunitySDK is referenced by
+          # 24 of the 26 plugins, and the Directory.Build files feed every project,
+          # so a targeted build off those would compile plugins against a stale SDK.
+          # installer/ and plugins.json are here because the MSI enumerates every
+          # plugin, and .github/workflows/ so a change to CI itself is proven against
+          # the full set.
+          $sharedPatterns = @(
+            '^CommunitySDK/',
+            '^Directory\.Build\.(props|targets)$',
+            '^plugins\.json$',
+            '^installer/',
+            '^\.github/workflows/'
+          )
+
+          $full = $false
+          $trigger = $null
+          foreach ($f in $changed) {
+            foreach ($pat in $sharedPatterns) {
+              if ($f -match $pat) { $full = $true; $trigger = $f; break }
+            }
+            if ($full) { break }
+          }
+
+          if ($full) {
+            Write-Host "`nShared path changed ($trigger) - building every plugin."
+          }
+
+          # True when $file is inside $owned, or is $owned itself. Compared with
+          # forward slashes throughout: git reports them that way and plugins.json
+          # stores them that way. The trailing slash matters - without it
+          # "Smart Client Plugins/Notepad" would also claim "...NotepadExtra".
+          #
+          # Case-insensitive deliberately. plugins.json is hand-maintained and its
+          # casing already drifts from git's - PKI's extraStagingFiles says
+          # "Installer/..." where the tree has "installer/". An exact comparison
+          # would quietly drop that plugin from the matrix, which is precisely the
+          # silent-skip failure this selection is meant to avoid.
+          function Test-Owned([string]$file, [string]$owned) {
+            $owned = $owned -replace '\\', '/'
+            return $file -eq $owned -or
+                   $file.StartsWith("$owned/", [StringComparison]::OrdinalIgnoreCase)
+          }
 
           foreach ($p in $plugins) {
             $project = if ($p.project) { $p.project } else { "$($p.name).csproj" }
@@ -73,6 +140,27 @@ jobs:
               }
             }
 
+            # Everything this plugin owns: its own folder, plus any project or
+            # staging path outside it. extraProjects points at a .csproj, so its
+            # containing folder is what counts as touched.
+            $owned = @($p.path)
+            if ($p.extraProjects)     { $owned += $p.extraProjects | ForEach-Object { ($_ -replace '\\', '/') -replace '/[^/]+$', '' } }
+            if ($p.extraStagingDirs)  { $owned += $p.extraStagingDirs }
+            if ($p.extraStagingFiles) { $owned += $p.extraStagingFiles }
+            $owned = $owned | Where-Object { $_ } | Select-Object -Unique
+
+            if (-not $full) {
+              $hit = $false
+              foreach ($f in $changed) {
+                foreach ($o in $owned) {
+                  if (Test-Owned $f $o) { $hit = $true; break }
+                }
+                if ($hit) { break }
+              }
+              if (-not $hit) { continue }
+              Write-Host "selected $($p.name)"
+            }
+
             $include += @{
               name       = $p.name
               projects   = $projects -join ';'
@@ -84,15 +172,26 @@ jobs:
           }
 
           $matrix = @{ include = $include } | ConvertTo-Json -Depth 5 -Compress
-          $namesList = $names | ConvertTo-Json -Compress
+          # -InputObject, not the pipeline: piping enumerates, so a single selected
+          # plugin would serialise as "FlexView" instead of ["FlexView"]. That never
+          # arose while the matrix was always all 26, and nothing in this workflow
+          # reads names today, but a consumer added later would break on exactly the
+          # one-plugin PR this change makes the common case.
+          $namesList = ConvertTo-Json -InputObject @($names) -Compress
+
+          Write-Host "`nBuilding $($include.Count) of $($plugins.Count) plugin(s)."
 
           "matrix=$matrix" >> $env:GITHUB_OUTPUT
           "names=$namesList" >> $env:GITHUB_OUTPUT
+          "count=$($include.Count)" >> $env:GITHUB_OUTPUT
+          "full=$($full.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
-  # Matrix build: each plugin compiles in parallel
+  # Matrix build: each selected plugin compiles in parallel.
+  # Guarded on count so an empty selection skips the job instead of failing on an
+  # empty matrix (a code change that touches no plugin, e.g. Tools/ or Tests/).
   build:
     needs: [changes, setup]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.setup.outputs.count != '0'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -168,10 +267,16 @@ jobs:
           path: ${{ matrix.name }}.zip
           retention-days: 1
 
-  # Build the unified installer (no release) to validate packaging
+  # Build the unified installer (no release) to validate packaging.
+  #
+  # Only on a full build. generate-wix.ps1 emits one component per plugin from
+  # plugins.json and wix resolves !(bindpath.zips)\<Name>-v<version>.zip at compile
+  # time, so a partial run is missing ZIPs and cannot link. Packaging is still
+  # proven whenever installer/, plugins.json or shared code changes, and
+  # unconditionally by build-release.yml.
   installer:
     needs: [changes, setup, build]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && needs.setup.outputs.full == 'true'
     runs-on: windows-latest
 
     steps:
@@ -275,12 +380,18 @@ jobs:
           path: MSCPlugins-pr-Setup.msi
           retention-days: 1
 
-  # Single, stable status check to require in branch protection. It passes only
-  # when every plugin built and the installer built. Require "PR Build / ci-success"
-  # in the ruleset instead of the churning per-plugin matrix job names.
+  # Single, stable status check to require in branch protection. Require
+  # "PR Build / ci-success" in the ruleset instead of the churning per-plugin
+  # matrix job names - which is also what makes a selective matrix possible at
+  # all, since the set of matrix job names now varies per PR.
+  #
+  # Three legitimate ways to pass without compiling: a docs-only change, a code
+  # change that touches no plugin, and a partial build where the installer was
+  # deliberately skipped. Each is checked explicitly rather than by treating
+  # "skipped" as success, so a job that skips for some other reason still fails.
   ci-success:
     if: always()
-    needs: [changes, build, installer]
+    needs: [changes, setup, build, installer]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all build jobs succeeded
@@ -289,8 +400,30 @@ jobs:
             echo "Docs-only change, build skipped."
             exit 0
           fi
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.installer.result }}" != "success" ]; then
-            echo "Build failed: build=${{ needs.build.result }}, installer=${{ needs.installer.result }}"
+
+          if [ "${{ needs.setup.result }}" != "success" ]; then
+            echo "Matrix generation failed: setup=${{ needs.setup.result }}"
             exit 1
           fi
-          echo "All build jobs succeeded."
+
+          if [ "${{ needs.setup.outputs.count }}" = "0" ]; then
+            echo "No plugin sources changed, nothing to build."
+            exit 0
+          fi
+
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Build failed: build=${{ needs.build.result }}"
+            exit 1
+          fi
+
+          # The installer only runs on a full build; on a partial one its result
+          # is "skipped" and that is the expected outcome, not a failure.
+          if [ "${{ needs.setup.outputs.full }}" = "true" ]; then
+            if [ "${{ needs.installer.result }}" != "success" ]; then
+              echo "Installer failed: installer=${{ needs.installer.result }}"
+              exit 1
+            fi
+            echo "Full build: all ${{ needs.setup.outputs.count }} plugin(s) and the installer succeeded."
+          else
+            echo "Partial build: ${{ needs.setup.outputs.count }} plugin(s) succeeded; installer skipped (no shared or installer change)."
+          fi
