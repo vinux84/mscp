@@ -17,6 +17,13 @@ updates:
       # on every release. Pin to security updates only so we don't get a PR
       # every week from a routine rebuild.
       - dependency-name: "FFmpeg.GPL"
+      # LiveCharts2 is held at 2.0.0-rc5.4 in MetadataDisplay. The 2.0.x stable
+      # line has API drift we have not validated against the LineChart render
+      # type, and the DLLs are ILRepacked /internalize'd, so a silent bump would
+      # only surface at runtime in Smart Client. Bump deliberately, not via PR.
+      - dependency-name: "LiveChartsCore.*"
+      - dependency-name: "SkiaSharp*"
+      - dependency-name: "HarfBuzzSharp*"
   - package-ecosystem: github-actions
     directory: /
     schedule:
