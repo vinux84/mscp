@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.4.30] - 2026-08-05
+- Add Flex View: **Save as Layout** - store the current pane arrangement as a reusable layout, offered in Smart Client setup mode under **Add View** alongside the built-in 1x1 and 2x2 templates. A layout stores geometry only - cameras and other view item content are not part of it, so a view created from one starts empty. The dialog previews exactly what will be stored, and a thumbnail of the arrangement is generated so the layout is recognisable in the picker.
+- Add Flex View: **Manage Layouts** - lists every layout defined on the site with its group, pane count and last-modified date, and deletes the selected one. Deletion is site-wide and cannot be undone. Views already built from a layout keep working, because each view holds its own copy of the arrangement.
+- Add Flex View: Copy views from federated child sites. Views are not part of Milestone Federated Architecture's client-session model, so a child-site view could never be resolved through the client session and the copy failed with "This view is on another site and could not be resolved through the current session". Views are now read directly from each site's Management Server configuration - which works uniformly for the master and every child site - and recreated locally with their camera slots restored. GH PR: #169
+- Add Flex View: Batch copy - check several views across sites, pick one destination folder, and get a single summary instead of one dialog per view.
+- Improve Flex View: The federated site and view walk is cached for the session with a manual **Refresh**, and the master's own view tree is pre-fetched once instead of being re-walked on every open. Browsing federated sites no longer freezes the client for 90 seconds or more.
+- Fix SC Remote Control: "Method not found: Swashbuckle.Application.HttpConfigurationExtensions.EnableSwagger" on machines running other MIP plugins. Swashbuckle.Core pins its AssemblyVersion at 1.0.0.0 in every package release, so two plugins shipping different builds present the same assembly identity, and in Smart Client's shared AppDomain whichever loads first wins for everyone. Swashbuckle is now merged and internalized into the plugin, so no shared identity is exposed. This only ever reproduced where a conflicting plugin was installed, which is why it looked machine-specific.
+- Improve Project: Applied the outstanding dependency updates - ILRepack 2.0.46, BouncyCastle.Cryptography 2.7.0, Microsoft.Web.WebView2 1.0.4078.44, and pymdown-extensions 11.0, which closes GHSA-9xwg-3r6f-jcx2 (path traversal in the b64 extension). LiveChartsCore is deliberately held at 2.0.0-rc5.4 and excluded from Dependabot, since the 2.0.x stable line has API drift not yet validated against the Metadata Display line chart.
+- Improve Project: The RTSPS test server's Dockerfile now pins both base images by digest, clearing the outstanding OpenSSF Scorecard pinned-dependency findings.
+- Improve Docs: Expanded the SC Remote Control documentation.
+
 ## [3.4.26] - 2026-06-27
 - Smart Bar: Fix large camera loading freezing it.
 
