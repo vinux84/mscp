@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Threading.Tasks;
 using FlexView.Models;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
@@ -1129,6 +1130,311 @@ namespace FlexView.Client
             UpdateStatus();
         }
 
+        // Copies a child-site view straight from its captured Management Server configuration (name,
+        // layout type, and the raw LayoutViewItems XML - the same wire format Get/AddView both read
+        // and write) into a folder on this site. This never routes through Configuration.Instance
+        // .GetItem for the source view - that lookup only resolves items the client session actually
+        // federates, and Views are not part of MFA's federated resource model (same limitation
+        // ViewSync's README documents for View Groups). The destination write goes through the same
+        // ConfigurationItems API (ViewGroup.ViewFolder.AddView), just targeted at this, locally
+        // connected/writable site instead of the source.
+
+        // Result of the background phase: everything RestoreCameraSlots needs, plus what's needed to
+        // report the outcome. Deliberately carries no ViewAndLayoutItem/client-session object across
+        // the Task.Run boundary - see the thread-affinity note on RestoreCameraSlots below.
+        private class PreparedCopy
+        {
+            public string NewViewPath;
+            public ServerId MasterServerId;
+            public List<FederationWalker.FedViewItem> CameraItems;
+        }
+
+        // Resolved once per destination folder, then reused for every view in a batch copy - avoids
+        // re-walking the whole ViewGroupFolder tree (FindViewGroupById) once per selected view, and
+        // ExistingNames lets every view in the batch get a unique name up front instead of each one
+        // finding out about a collision only when AddView itself rejects it.
+        private class DestinationInfo
+        {
+            public VideoOS.Platform.ConfigurationItems.ViewGroup ViewGroup;
+            public ServerId MasterServerId;
+            public HashSet<string> ExistingNames;
+        }
+
+        // Background-thread phase: raw config-API only, no client-session objects touched.
+        private static DestinationInfo ResolveDestination(Item destFolder)
+        {
+            var masterFqid = EnvironmentManager.Instance.MasterSite;
+            if (masterFqid == null) throw new InvalidOperationException("Master site is not available.");
+
+            var ms = new VideoOS.Platform.ConfigurationItems.ManagementServer(masterFqid);
+            var viewGroup = FederationWalker.FindViewGroupById(ms.ViewGroupFolder, destFolder.FQID.ObjectId);
+            if (viewGroup == null)
+                throw new InvalidOperationException($"Could not locate '{destFolder.Name}' in the site configuration.");
+
+            var existingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var views = viewGroup.ViewFolder?.Views;
+                if (views != null) foreach (var v in views) existingNames.Add(v.Name);
+            }
+            catch { }
+
+            return new DestinationInfo { ViewGroup = viewGroup, MasterServerId = masterFqid.ServerId, ExistingNames = existingNames };
+        }
+
+        // Appends " (n)" until the name doesn't collide with anything already in ExistingNames -
+        // covers both views already in the destination folder and other views earlier in this same
+        // batch (ExistingNames is mutated as each name is claimed).
+        private static string UniqueName(HashSet<string> existingNames, string baseName)
+        {
+            var candidate = baseName;
+            var n = 1;
+            while (existingNames.Contains(candidate))
+                candidate = $"{baseName} ({++n})";
+            existingNames.Add(candidate);
+            return candidate;
+        }
+
+        // AddView + WaitForServerTask + reading the source's camera items are all raw config-API
+        // calls (VideoOS.Platform.ConfigurationItems) - thread-agnostic, confirmed safe on a
+        // background thread. Restoring those cameras onto the new view is NOT: that touches a
+        // ViewAndLayoutItem, a client-session object, on the UI thread only (see RestoreCameraSlots).
+        // So the slow network-bound part runs via Task.Run, and only the final restore step - bounded
+        // to a few seconds by RestoreCameraSlots' own retry cap - runs on the UI thread.
+        private async void CopyFederatedViewToLocal(FederationWalker.FedView fv)
+        {
+            if (fv == null || !fv.HasLayoutXml)
+            {
+                MessageDialog.ShowError("Open Failed",
+                    "This view's layout could not be read from its site's configuration. See MIPLog for details.",
+                    Window.GetWindow(this));
+                return;
+            }
+
+            var dlg = new SaveViewWindow(fv.Name, null);
+            dlg.Owner = Application.Current.MainWindow;
+            if (dlg.ShowDialog() != true) return;
+
+            var destFolder = dlg.SelectedFolder;
+            var newName = dlg.ViewName;
+
+            try
+            {
+                var prep = await Task.Run(() =>
+                {
+                    var dest = ResolveDestination(destFolder);
+                    return PrepareFederatedCopy(fv, dest.ViewGroup, dest.MasterServerId, newName);
+                });
+
+                int restored = 0, attempted = prep.CameraItems.Count;
+                if (attempted > 0)
+                    restored = await RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
+
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Copied '{fv.Name}' from site '{fv.SiteName}' into '{destFolder.Name}' as '{newName}' ({restored}/{attempted} camera(s) restored).");
+                var cameraNote = attempted == 0 ? "" : restored == attempted
+                    ? $" All {attempted} camera(s) were carried over."
+                    : $" {restored} of {attempted} camera(s) were carried over - see MIPLog for the rest.";
+                MessageDialog.ShowSuccess("View Copied",
+                    $"\"{fv.Name}\" was copied from {fv.SiteName} into \"{destFolder.Name}\" as \"{newName}\".{cameraNote}",
+                    Window.GetWindow(this));
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] CopyFederatedViewToLocal failed: {ex}");
+                MessageDialog.ShowError("Copy Failed", $"Failed to copy the view:\n{ex.Message}", Window.GetWindow(this));
+            }
+        }
+
+        // Batch version: one destination folder for every selected view (picked once, not per view),
+        // each view keeps its own name - auto-deduped via UniqueName rather than prompted per view -
+        // and one summary dialog covers the whole batch instead of one dialog per view. A failure on
+        // one view is recorded in the summary and does not stop the rest of the batch.
+        private async void CopyMultipleFederatedViewsToLocal(List<FederationWalker.FedView> views)
+        {
+            if (views == null || views.Count == 0) return;
+
+            var folderPicker = new ViewBrowserWindow(BrowseMode.SelectFolder);
+            folderPicker.Owner = Application.Current.MainWindow;
+            if (folderPicker.ShowDialog() != true || folderPicker.SelectedItem == null) return;
+            var destFolder = folderPicker.SelectedItem;
+
+            DestinationInfo dest;
+            try
+            {
+                dest = await Task.Run(() => ResolveDestination(destFolder));
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] CopyMultipleFederatedViewsToLocal failed to resolve destination: {ex}");
+                MessageDialog.ShowError("Copy Failed", $"Failed to copy views:\n{ex.Message}", Window.GetWindow(this));
+                return;
+            }
+
+            var lines = new List<string>();
+            int succeeded = 0;
+
+            foreach (var fv in views)
+            {
+                var newName = UniqueName(dest.ExistingNames, fv.Name);
+                try
+                {
+                    var prep = await Task.Run(() => PrepareFederatedCopy(fv, dest.ViewGroup, dest.MasterServerId, newName));
+
+                    int restored = 0, attempted = prep.CameraItems.Count;
+                    if (attempted > 0)
+                        restored = await RestoreCameraSlots(prep.MasterServerId, prep.NewViewPath, prep.CameraItems);
+
+                    lines.Add(attempted == 0
+                        ? $"✓ \"{newName}\" (from {fv.SiteName})"
+                        : $"✓ \"{newName}\" (from {fv.SiteName}) - {restored}/{attempted} camera(s)");
+                    succeeded++;
+                }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Batch copy failed for '{fv.Name}' ({fv.SiteName}): {ex}");
+                    lines.Add($"✗ \"{fv.Name}\" (from {fv.SiteName}) - {ex.Message}");
+                }
+            }
+
+            FlexViewDefinition.Log.Info($"[FlexViewFed] Batch copy into '{destFolder.Name}': {succeeded}/{views.Count} view(s) copied.");
+            var title = succeeded == views.Count ? "Views Copied" : "Some Views Failed";
+            MessageDialog.ShowSuccess(title,
+                $"{succeeded} of {views.Count} view(s) copied into \"{destFolder.Name}\":\n\n" + string.Join("\n", lines),
+                Window.GetWindow(this));
+        }
+
+        // Background-thread phase: raw config-API only, no client-session objects touched.
+        private static PreparedCopy PrepareFederatedCopy(FederationWalker.FedView fv, VideoOS.Platform.ConfigurationItems.ViewGroup viewGroup, ServerId masterServerId, string newName)
+        {
+            var task = viewGroup.ViewFolder.AddView(
+                newName,
+                fv.Shortcut ?? "",
+                fv.LayoutType ?? "",
+                fv.LayoutCustomId ?? "",
+                fv.LayoutIcon ?? "",
+                fv.LayoutViewItemsXml);
+            WaitForServerTask(task, "AddView");
+
+            return new PreparedCopy
+            {
+                NewViewPath = task.Path,
+                MasterServerId = masterServerId,
+                CameraItems = FederationWalker.ReadCameraItems(fv)
+            };
+        }
+
+        // Restores camera slots onto the view AddView just created. The destination is always local
+        // (this site), so - unlike the source - Configuration.Instance.GetItem resolves it fine once
+        // we know its Id: ServerTask.Path (from AddView) is the new view's config-API path, used to
+        // read its raw View object and pull out the Id needed to rebuild a client FQID. From there
+        // it's the exact same InsertBuiltinViewItem pipeline the same-site copy already uses.
+        // Per-slot failures are logged and skipped rather than failing the whole copy - the view and
+        // its layout already exist at this point regardless.
+        //
+        // MUST be called on Smart Client's own UI thread. Confirmed against a real run: calling this
+        // from a background thread throws "The calling thread cannot access this object because a
+        // different thread owns it" on Save - the ViewAndLayoutItem returned by Configuration.Instance
+        // .GetItem is a client-session object with thread affinity, unlike the raw ConfigurationItems.*
+        // objects used elsewhere in this file, which have no such restriction.
+        //
+        // Uses await Task.Delay (not Thread.Sleep) between retry attempts so the UI stays responsive
+        // while waiting - confirmed against a real system that the client cache can take 45+ seconds
+        // to notice a view created through the raw config API side channel, and each GetItem attempt
+        // itself (not just the delay between attempts) can take 2-3 seconds since it's a real network
+        // call that must run on this thread. Delay-based yielding can't eliminate that per-attempt
+        // cost, but it does mean Smart Client's message pump isn't dead for the whole wait - just
+        // briefly busy during each individual attempt.
+        private static async Task<int> RestoreCameraSlots(ServerId masterServerId, string newViewPath, List<FederationWalker.FedViewItem> items)
+        {
+            if (string.IsNullOrEmpty(newViewPath)) return 0;
+
+            VideoOS.Platform.ConfigurationItems.View newConfigView;
+            try { newConfigView = new VideoOS.Platform.ConfigurationItems.View(masterServerId, newViewPath); }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Could not read the new view at '{newViewPath}': {ex.Message}");
+                return 0;
+            }
+
+            if (!Guid.TryParse(newConfigView.Id, out var newViewObjectId))
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] New view Id '{newConfigView.Id}' is not a GUID - cannot restore camera content.");
+                return 0;
+            }
+
+            // The client session's own item cache for built-in kinds (View included) doesn't see a
+            // just-created item immediately - it was written through the raw config API, a side
+            // channel the client cache isn't notified about synchronously. Configuration.RefreshConfiguration
+            // explicitly does not apply here (SDK docs: "Only works for plug-in defined configurations
+            // ... built-in item types ... cannot be refreshed"), so the only option is to wait the
+            // environment's own propagation out with a bounded retry.
+            var newViewFqid = new FQID(masterServerId, Guid.Empty, newViewObjectId, FolderType.No, Kind.View);
+            ViewAndLayoutItem newClientItem = null;
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            int attempt = 0;
+            while (newClientItem == null && DateTime.UtcNow < deadline)
+            {
+                attempt++;
+                if (attempt > 1) await Task.Delay(500);
+                newClientItem = Configuration.Instance.GetItem(newViewFqid) as ViewAndLayoutItem;
+            }
+            if (newClientItem == null)
+            {
+                FlexViewDefinition.Log.Info($"[FlexViewFed] Could not resolve the newly created view via the client session after {attempt} attempt(s) - camera content not restored.");
+                return 0;
+            }
+
+            int restored = 0;
+            foreach (var item in items)
+            {
+                if (item.CameraId == null) continue;
+                try
+                {
+                    newClientItem.InsertBuiltinViewItem(item.Position, ViewAndLayoutItem.CameraBuiltinId,
+                        new Dictionary<string, string> { ["CameraId"] = item.CameraId.Value.ToString() });
+                    restored++;
+                }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] slot[{item.Position}]: restore failed for camera {item.CameraId}: {ex.Message}");
+                }
+            }
+
+            // Confirmed against a real run: InsertBuiltinViewItem's changes stuck (the resulting view
+            // genuinely had working cameras) even on a run where this Save() call itself failed (it was
+            // called from the wrong thread, before this method was fixed to always run on the UI
+            // thread). So a Save() failure here is logged but does not roll the already-successful
+            // restored count back to 0 - that undercounted a copy that had actually worked.
+            if (restored > 0)
+            {
+                try { newClientItem.Save(); }
+                catch (Exception ex)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Save after camera restore failed (restored slots may already be persisted regardless): {ex.Message}");
+                }
+            }
+            return restored;
+        }
+
+        // AddView/AddViewGroup run as a server-side task that may not be finished when the call
+        // returns (ServerTask.Progress < 100) - the SDK docs say to poll UpdateState() until it
+        // completes. Without this, a server-side failure (e.g. a duplicate name) would otherwise be
+        // reported back as a success.
+        private static void WaitForServerTask(VideoOS.Platform.ConfigurationItems.ServerTask task, string what)
+        {
+            if (task == null) throw new InvalidOperationException($"{what}: server returned no task.");
+
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (task.Progress < 100 && task.State != VideoOS.Platform.ConfigurationItems.StateEnum.Error && DateTime.UtcNow < deadline)
+            {
+                System.Threading.Thread.Sleep(200);
+                task.UpdateState();
+            }
+
+            if (task.State == VideoOS.Platform.ConfigurationItems.StateEnum.Error)
+                throw new InvalidOperationException($"{what} failed: {task.ErrorText ?? task.ErrorCode ?? "unknown error"}");
+        }
+
         private void TryReadSlotLabels(ViewAndLayoutItem view)
         {
             try
@@ -1247,19 +1553,38 @@ namespace FlexView.Client
 
                 if (!proceed) return;
 
-                var browser = new ViewBrowserWindow(BrowseMode.SelectView);
+                // Browse views across all sites (master + federated children).
+                var browser = new ViewBrowserWindow(BrowseMode.SelectView, federated: true);
                 browser.Owner = Application.Current.MainWindow;
-                if (browser.ShowDialog() == true && browser.SelectedItem != null)
-                {
-                    var view = browser.SelectedItem as ViewAndLayoutItem;
-                    if (view == null)
-                    {
-                        MessageDialog.ShowError("Open Failed", "Selected item is not a view layout.", Window.GetWindow(this));
-                        return;
-                    }
+                if (browser.ShowDialog() != true) return;
 
-                    LoadViewForEditing(view, browser.SelectedParent);
+                // Multiple checked child-site views: one folder picker, one batch copy, one summary.
+                if (browser.SelectedFedViews != null && browser.SelectedFedViews.Count > 0)
+                {
+                    CopyMultipleFederatedViewsToLocal(browser.SelectedFedViews);
+                    return;
                 }
+
+                // Child-site view: copy its captured layout XML straight into a folder on this site,
+                // rather than trying to resolve it to a live ViewAndLayoutItem - Views are not part of
+                // MFA's federated client-session model, so that resolve always returns null.
+                if (browser.SelectedFedView != null)
+                {
+                    CopyFederatedViewToLocal(browser.SelectedFedView);
+                    return;
+                }
+
+                if (browser.SelectedItem == null) return;
+
+                var view = browser.SelectedItem as ViewAndLayoutItem;
+                if (view == null)
+                {
+                    FlexViewDefinition.Log.Info($"[FlexViewFed] Selected item '{browser.SelectedItem.Name}' is not a ViewAndLayoutItem (kind={browser.SelectedItem.FQID?.Kind}).");
+                    MessageDialog.ShowError("Open Failed", "Selected item is not a view layout.", Window.GetWindow(this));
+                    return;
+                }
+
+                LoadViewForEditing(view, browser.SelectedParent);
             }
             catch (Exception ex)
             {
