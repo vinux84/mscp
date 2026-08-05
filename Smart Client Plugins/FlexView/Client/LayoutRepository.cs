@@ -233,7 +233,8 @@ namespace FlexView.Client
                     $"The server's removable-layout list does not contain '{layout.Name}'. See MIPLog for the full list it returned.");
             }
 
-            Log.Info($"{P} RemoveLayout: selected '{selection}'.");
+            var side = choices.Any(kv => kv.Value == selection) ? "value" : "key";
+            Log.Info($"{P} RemoveLayout: submitting ItemSelection='{selection}' (the {side} side of the pair).");
             task.ItemSelection = selection;
 
             var result = task.Execute();
@@ -243,8 +244,16 @@ namespace FlexView.Client
             Log.Info($"{P} RemoveLayout: '{layout.Name}' removed from group '{layout.GroupName}'.");
         }
 
-        // The dictionary's key/value orientation is not contractual across versions, so both sides are
-        // matched, strongest identifier first: path, then id, then name.
+        // Picks the token to hand back as ItemSelection.
+        //
+        // On 26.1 the dictionary is {display name -> item path}: key='FlexView 3 panes',
+        // value='Layout[629cb03d-...]'. The server wants the path. Submitting the key gets
+        // ArgumentMIPException("itemSelection") straight back.
+        //
+        // The orientation is not contractual across versions though, so rather than hard-coding
+        // "always send the value", both sides are matched against the layout's own identifiers and
+        // whichever side IS the identifier gets submitted. The display name is never submitted -
+        // it is only ever used to find the pair.
         private static string ResolveSelection(IDictionary<string, string> choices, LayoutInfo layout)
         {
             foreach (var probe in new[] { layout.Path, layout.Id })
@@ -252,32 +261,36 @@ namespace FlexView.Client
                 if (string.IsNullOrEmpty(probe)) continue;
                 foreach (var kv in choices)
                 {
+                    if (string.Equals(kv.Value, probe, StringComparison.OrdinalIgnoreCase)) return kv.Value;
                     if (string.Equals(kv.Key, probe, StringComparison.OrdinalIgnoreCase)) return kv.Key;
-                    if (string.Equals(kv.Value, probe, StringComparison.OrdinalIgnoreCase)) return kv.Key;
                 }
             }
 
-            // Id can appear embedded in a longer path-style key, e.g. "Layout[<guid>]".
-            foreach (var probe in new[] { layout.Id, layout.Path })
+            // Id embedded in a longer path-style token, e.g. "Layout[<guid>]".
+            if (!string.IsNullOrEmpty(layout.Id))
             {
-                if (string.IsNullOrEmpty(probe)) continue;
                 foreach (var kv in choices)
                 {
-                    if (kv.Key != null && kv.Key.IndexOf(probe, StringComparison.OrdinalIgnoreCase) >= 0) return kv.Key;
-                    if (kv.Value != null && kv.Value.IndexOf(probe, StringComparison.OrdinalIgnoreCase) >= 0) return kv.Key;
+                    if (kv.Value != null && kv.Value.IndexOf(layout.Id, StringComparison.OrdinalIgnoreCase) >= 0) return kv.Value;
+                    if (kv.Key != null && kv.Key.IndexOf(layout.Id, StringComparison.OrdinalIgnoreCase) >= 0) return kv.Key;
                 }
             }
 
-            // Name last: it is the weakest match, so it is only accepted when it is unambiguous.
+            // Name last: the weakest match, accepted only when unambiguous, and even then what gets
+            // submitted is the opposite side of the pair - the identifier, not the name itself.
             if (!string.IsNullOrEmpty(layout.Name))
             {
                 var byName = choices
-                    .Where(kv => string.Equals(kv.Value, layout.Name, StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(kv.Key, layout.Name, StringComparison.OrdinalIgnoreCase))
-                    .Select(kv => kv.Key)
+                    .Where(kv => string.Equals(kv.Key, layout.Name, StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(kv.Value, layout.Name, StringComparison.OrdinalIgnoreCase))
                     .ToList();
 
-                if (byName.Count == 1) return byName[0];
+                if (byName.Count == 1)
+                {
+                    var kv = byName[0];
+                    return string.Equals(kv.Key, layout.Name, StringComparison.OrdinalIgnoreCase) ? kv.Value : kv.Key;
+                }
+
                 if (byName.Count > 1)
                     Log.Info($"{P} RemoveLayout: name '{layout.Name}' matched {byName.Count} candidates, refusing to guess.");
             }
@@ -336,6 +349,51 @@ namespace FlexView.Client
             }
 
             Log.Info($"{P} {what}: completed - state={task.State} progress={task.Progress} after {polls} poll(s).");
+        }
+
+        // Add and Remove write straight to the Management Server through the configuration API, a
+        // side channel the running Smart Client's own configuration is never notified about. Until
+        // the client re-reads it, a new layout is missing from Add View and a deleted one is still
+        // offered - which reads as the operation having silently failed.
+        //
+        // Reaching for something narrower than a full reload is the obvious instinct here. There
+        // isn't one, and the reason is worth writing down so it does not get re-litigated:
+        //
+        //   - ClearChildrenCache above clears the cache on our own ManagementServer instance. That
+        //     is what makes Manage Layouts show the truth. It says nothing to the client.
+        //   - Configuration.RefreshConfiguration(Kind.Layout) compiles - Kind.Layout exists - but
+        //     Milestone Development have confirmed it is a no-op for built-in kinds: "RefreshConfiguration
+        //     only works for plugin configurations... Any build-in item configuration is maintained
+        //     by the environment and thus cannot be refreshed through MIP."
+        //     https://forum.milestonesys.com/t/12005/6
+        //   - Even if it did work it would flush the wrong cache. It clears Configuration.Instance,
+        //     the MIP item cache a plugin reads through GetItemsByKind. The Add View picker is
+        //     native Smart Client UI reading the client's own configuration, which is a different
+        //     cache. ColoredTimeline's RefreshConfiguration call is not a counter-example: it passes
+        //     a plugin-defined kind and then re-reads through Configuration.Instance itself, so it
+        //     refreshes and reads the same cache.
+        //
+        // The client-wide reload is the only thing that reaches the cache the picker actually uses,
+        // and it is precisely what the operator would otherwise trigger by hand through Reload
+        // Configuration. It is coarse by necessity, not by shortcut - so callers should send it once
+        // per batch of changes rather than once per change.
+        public static void RequestClientConfigurationReload()
+        {
+            try
+            {
+                Log.Info($"{P} Requesting a Smart Client configuration reload so the layout picker picks the change up.");
+                EnvironmentManager.Instance.SendMessage(
+                    new VideoOS.Platform.Messaging.Message(
+                        VideoOS.Platform.Messaging.MessageId.SmartClient.ReloadConfigurationCommand));
+                Log.Info($"{P} Reload command sent.");
+            }
+            catch (Exception ex)
+            {
+                // Not fatal: the write already succeeded on the server. It only means the operator
+                // has to reload by hand before the change shows up in Add View.
+                Log.Error($"{P} Reload command failed - {ex.GetType().Name}: {ex.Message}. "
+                        + "Add View may stay stale until the client reloads its configuration manually.", ex);
+            }
         }
 
         private static void TryClearCache(ConfigItems.LayoutFolder folder, string what)

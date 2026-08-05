@@ -19,7 +19,6 @@ namespace FlexView.Client
         // Internal, not public: these surface LayoutRepository's internal types, and the window
         // class itself has to stay public for the XAML-generated partial to match.
         internal string LayoutName => nameBox.Text?.Trim();
-        internal string LayoutDescription => descriptionBox.Text?.Trim() ?? "";
         internal LayoutRepository.LayoutGroupInfo SelectedGroup =>
             groupCombo.SelectedItem as LayoutRepository.LayoutGroupInfo;
 

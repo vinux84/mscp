@@ -171,36 +171,27 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <DockPanel Grid.Row="0" Grid.Column="0" Margin="0,0,14,10">
                 <TextBlock Text="Name:" Foreground="#FFB0B0B0" VerticalAlignment="Center"
-                           Width="74" FontSize="12"/>
+                           Width="52" FontSize="12"/>
                 <TextBox x:Name="nameBox" Background="#FF050811" Foreground="White"
                          CaretBrush="White" BorderBrush="#FF30363D" Padding="6,4" FontSize="12"
                          VerticalContentAlignment="Center" TextChanged="OnNameChanged"/>
             </DockPanel>
 
             <DockPanel Grid.Row="1" Grid.Column="0" Margin="0,0,14,10">
-                <TextBlock Text="Description:" Foreground="#FFB0B0B0" VerticalAlignment="Center"
-                           Width="74" FontSize="12"/>
-                <TextBox x:Name="descriptionBox" Background="#FF050811" Foreground="White"
-                         CaretBrush="White" BorderBrush="#FF30363D" Padding="6,4" FontSize="12"
-                         VerticalContentAlignment="Center"/>
-            </DockPanel>
-
-            <DockPanel Grid.Row="2" Grid.Column="0" Margin="0,0,14,10">
                 <TextBlock Text="Group:" Foreground="#FFB0B0B0" VerticalAlignment="Center"
-                           Width="74" FontSize="12"/>
+                           Width="52" FontSize="12"/>
                 <ComboBox x:Name="groupCombo" Style="{StaticResource DarkCombo}"/>
             </DockPanel>
 
-            <TextBlock x:Name="paneSummary" Grid.Row="3" Grid.Column="0" Margin="74,0,14,0"
+            <TextBlock x:Name="paneSummary" Grid.Row="2" Grid.Column="0" Margin="52,0,14,0"
                        Foreground="#FF8B949E" FontSize="11.5" TextWrapping="Wrap"/>
 
             <!-- Preview of exactly what will be stored, rendered from the same rectangles. -->
-            <Border Grid.Row="0" Grid.Column="1" Grid.RowSpan="4" Width="150" Height="120"
+            <Border Grid.Row="0" Grid.Column="1" Grid.RowSpan="3" Width="150" Height="120"
                     Background="#FF050811" BorderBrush="#FF30363D" BorderThickness="1"
                     VerticalAlignment="Top">
                 <Image x:Name="previewImage" Stretch="Uniform" Margin="4"

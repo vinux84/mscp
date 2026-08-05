@@ -18,10 +18,26 @@ namespace FlexView.Client
         private List<LayoutRepository.LayoutGroupInfo> _groups = new List<LayoutRepository.LayoutGroupInfo>();
         private bool _busy;
 
+        // Set by any successful delete. The client-wide configuration reload that makes Add View
+        // notice the change is deliberately deferred to close: it is the only mechanism available
+        // (see LayoutRepository.RequestClientConfigurationReload) and it is expensive, so deleting
+        // five layouts should cost one reload rather than five. The list in this window does not
+        // depend on it - each refresh re-reads the server directly.
+        private bool _configChanged;
+
         public ManageLayoutsWindow()
         {
             InitializeComponent();
             Loaded += async (s, e) => await LoadAsync();
+
+            // Hooked on Closed rather than the Close button so the reload still happens when the
+            // window is dismissed with the title bar X or Alt+F4.
+            Closed += (s, e) =>
+            {
+                if (!_configChanged) return;
+                FlexViewDefinition.Log.Info("[FlexViewLayout] Manage Layouts closed after changes - reloading client configuration once.");
+                LayoutRepository.RequestClientConfigurationReload();
+            };
         }
 
         private async Task LoadAsync()
@@ -118,6 +134,10 @@ namespace FlexView.Client
             {
                 await Task.Run(() => LayoutRepository.RemoveLayout(layout));
                 FlexViewDefinition.Log.Info($"[FlexViewLayout] Delete of '{layout.Name}' succeeded.");
+
+                // The client keeps offering a deleted layout in Add View until it re-reads its
+                // configuration. Batched to window close rather than done here - see _configChanged.
+                _configChanged = true;
 
                 // Reload rather than removing the row locally, so the list reflects what the server
                 // actually holds - a partially applied delete would otherwise stay invisible.

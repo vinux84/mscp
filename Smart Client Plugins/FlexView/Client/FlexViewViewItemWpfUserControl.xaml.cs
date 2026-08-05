@@ -1756,7 +1756,6 @@ namespace FlexView.Client
 
             var group = dlg.SelectedGroup;
             var name = dlg.LayoutName;
-            var description = dlg.LayoutDescription;
 
             // Rendered here, on the UI thread: RenderTargetBitmap needs a Dispatcher, so it cannot
             // move into the Task.Run below.
@@ -1779,7 +1778,13 @@ namespace FlexView.Client
             statusText.Text = $"Saving layout \"{name}\"...";
             try
             {
-                await Task.Run(() => LayoutRepository.AddLayout(group, name, description, definitionXml));
+                // AddLayout's description is required by the SDK signature but nothing in the
+                // picker surfaces it, so it is not worth a field on the dialog.
+                await Task.Run(() => LayoutRepository.AddLayout(group, name, "", definitionXml));
+
+                // Without this the layout is on the server but absent from Add View until the
+                // operator reloads the client by hand, which reads as the save having failed.
+                LayoutRepository.RequestClientConfigurationReload();
 
                 FlashStatus($"Saved layout \"{name}\"");
                 MessageDialog.ShowSuccess("Layout Saved",

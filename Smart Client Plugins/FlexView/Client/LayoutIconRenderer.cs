@@ -16,7 +16,10 @@ namespace FlexView.Client
     // thread. Callers render first, then hand the resulting base64 string to the background save.
     internal static class LayoutIconRenderer
     {
-        private const int IconPixels = 64;
+        // 16x16 to match the built-in layout icons. The picker draws the bitmap at its native size
+        // rather than scaling it to the row, so a larger icon does not render sharper - it stretches
+        // the row it sits in and towers over the 1x1 / 2x2 / 3x3 entries beside it.
+        private const int IconPixels = 16;
 
         // Mid-tone fill deliberately: the picker background differs between Smart Client themes, and
         // a mid grey stays legible against both rather than disappearing into one of them.
@@ -47,20 +50,29 @@ namespace FlexView.Client
                     pen.Freeze();
 
                     var any = false;
+                    const double scale = (double)IconPixels / LayoutRepository.SdkMax;
+
                     foreach (var r in rects)
                     {
                         any = true;
-                        var scale = (double)IconPixels / LayoutRepository.SdkMax;
+
+                        // Round each edge independently rather than rounding position and size
+                        // separately. At 16px a 5% pane is well under one pixel, and rounding the
+                        // size on its own collapses it to zero - the pane would silently vanish
+                        // from the icon while still existing in the layout.
+                        var x0 = Math.Round(r.X * scale);
+                        var y0 = Math.Round(r.Y * scale);
+                        var x1 = Math.Round((r.X + r.Width) * scale);
+                        var y1 = Math.Round((r.Y + r.Height) * scale);
 
                         // Half-pixel offset keeps the 1px stroke on a device pixel instead of
-                        // straddling two, which otherwise renders as a soft 2px smear at this size.
-                        var x = Math.Round(r.X * scale) + 0.5;
-                        var y = Math.Round(r.Y * scale) + 0.5;
-                        var w = Math.Round(r.Width * scale) - 1.0;
-                        var h = Math.Round(r.Height * scale) - 1.0;
+                        // straddling two, which otherwise renders as a soft 2px smear. Insetting by
+                        // one leaves a hairline between neighbours, which is what separates the
+                        // panes visually at this size.
+                        var w = Math.Max(1.0, x1 - x0 - 1.0);
+                        var h = Math.Max(1.0, y1 - y0 - 1.0);
 
-                        if (w <= 0 || h <= 0) continue;
-                        dc.DrawRectangle(PaneFill, pen, new Rect(x, y, w, h));
+                        dc.DrawRectangle(PaneFill, pen, new Rect(x0 + 0.5, y0 + 0.5, w, h));
                     }
 
                     if (!any) return null;
