@@ -42,4 +42,10 @@
     <EmbeddedResource Include="OpenApi\swagger-ui\swagger-ui.css" />
   </ItemGroup>
 
+  <Target Name="MergeSwashbuckle" AfterTargets="MergeCommunitySDK" BeforeTargets="MIPDeploy"
+          Condition="Exists('$(TargetDir)Swashbuckle.Core.dll')">
+    <Exec Command="&quot;$(PkgILRepack)\tools\ILRepack.exe&quot; /internalize /lib:&quot;$(TargetDir).&quot; /out:&quot;$(TargetPath)&quot; &quot;$(TargetPath)&quot; &quot;$(TargetDir)Swashbuckle.Core.dll&quot;" />
+    <Delete Files="$(TargetDir)Swashbuckle.Core.dll;$(TargetDir)Swashbuckle.Core.pdb" />
+  </Target>
+
 </Project>
