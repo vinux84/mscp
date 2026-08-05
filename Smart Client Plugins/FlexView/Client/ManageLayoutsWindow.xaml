@@ -1,0 +1,190 @@
+<Window x:Class="FlexView.Client.ManageLayoutsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Layouts" Width="820" Height="520"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF0D1117" ResizeMode="CanResize" MinWidth="640" MinHeight="380">
+    <Window.Resources>
+        <ControlTemplate x:Key="FlatButtonTemplate" TargetType="Button">
+            <Border x:Name="border" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                  RecognizesAccessKey="True"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="border" Property="Background" Value="#FF4A4F54"/>
+                    <Setter TargetName="border" Property="BorderBrush" Value="#FF666666"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter TargetName="border" Property="Background" Value="#FF555A5F"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter TargetName="border" Property="Background" Value="#FF26292D"/>
+                    <Setter TargetName="border" Property="BorderBrush" Value="#FF3A3F44"/>
+                    <Setter Property="Foreground" Value="#FF6E7681"/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
+
+        <ControlTemplate x:Key="DangerButtonTemplate" TargetType="Button">
+            <Border x:Name="border" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
+                    Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                  RecognizesAccessKey="True"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="border" Property="Background" Value="#FFE5534C"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter TargetName="border" Property="Background" Value="#FFF06A64"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter TargetName="border" Property="Background" Value="#FF26292D"/>
+                    <Setter TargetName="border" Property="BorderBrush" Value="#FF3A3F44"/>
+                    <Setter Property="Foreground" Value="#FF6E7681"/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
+
+        <Style x:Key="FlatButton" TargetType="Button">
+            <Setter Property="Background" Value="#FF3A3F44"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#FF555555"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="Padding" Value="16,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template" Value="{StaticResource FlatButtonTemplate}"/>
+        </Style>
+
+        <Style x:Key="DangerButton" TargetType="Button">
+            <Setter Property="Background" Value="#FFC93C37"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#FFE5534C"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="Padding" Value="16,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template" Value="{StaticResource DangerButtonTemplate}"/>
+        </Style>
+
+        <!-- Dark list. The stock GridView header and selection colors are system-light, so both
+             are retemplated to match the rest of the plugin. -->
+        <Style x:Key="DarkHeader" TargetType="GridViewColumnHeader">
+            <Setter Property="Foreground" Value="#FF8B949E"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewColumnHeader">
+                        <Border Background="#FF161B22" BorderBrush="#FF30363D" BorderThickness="0,0,1,1"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkRow" TargetType="ListViewItem">
+            <Setter Property="Foreground" Value="#FFE6EDF3"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListViewItem">
+                        <Border x:Name="bd" Background="Transparent" BorderBrush="#FF21262D"
+                                BorderThickness="0,0,0,1" Padding="0,5">
+                            <GridViewRowPresenter VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF161B22"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF1F3A5F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Manage Layouts" Foreground="White" FontSize="14"
+                   FontWeight="SemiBold" Margin="0,0,0,10"/>
+
+        <Border Grid.Row="1" Background="#FF1C1A08" BorderBrush="#FF9E6A03" BorderThickness="1"
+                Padding="10,8" Margin="0,0,0,12">
+            <TextBlock Foreground="#FFD29922" FontSize="11.5" TextWrapping="Wrap"
+                       Text="Layouts are shared server configuration. Deleting one removes it for every operator on this site, and cannot be undone. Views already built from a layout keep working - they hold their own copy of the arrangement."/>
+        </Border>
+
+        <Border Grid.Row="2" BorderBrush="#FF30363D" BorderThickness="1" Background="#FF050811">
+            <Grid>
+                <ListView x:Name="layoutList" Background="Transparent" BorderThickness="0"
+                          Foreground="#FFE6EDF3"
+                          ItemContainerStyle="{StaticResource DarkRow}"
+                          SelectionMode="Single"
+                          SelectionChanged="OnSelectionChanged"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListView.View>
+                        <GridView ColumnHeaderContainerStyle="{StaticResource DarkHeader}">
+                            <GridViewColumn Header="Layout" Width="240"
+                                            DisplayMemberBinding="{Binding Name}"/>
+                            <GridViewColumn Header="Group" Width="160"
+                                            DisplayMemberBinding="{Binding GroupName}"/>
+                            <GridViewColumn Header="Panes" Width="60"
+                                            DisplayMemberBinding="{Binding PaneText}"/>
+                            <GridViewColumn Header="Modified" Width="130"
+                                            DisplayMemberBinding="{Binding ModifiedText}"/>
+                            <GridViewColumn Header="Description" Width="180"
+                                            DisplayMemberBinding="{Binding Description}"/>
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+
+                <!-- Shown instead of the list while loading, and when the list has nothing in it. -->
+                <TextBlock x:Name="listPlaceholder" Foreground="#FF8B949E" FontSize="12.5"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"
+                           Visibility="Collapsed"/>
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="statusText" Grid.Row="3" Foreground="#FF8B949E" FontSize="11.5"
+                   Margin="0,10,0,0" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button x:Name="refreshButton" Content="Refresh" Click="OnRefreshClick"
+                    Style="{StaticResource FlatButton}" Margin="0,0,8,0"/>
+            <Button x:Name="deleteButton" Content="Delete Layout" Click="OnDeleteClick"
+                    Style="{StaticResource DangerButton}" Margin="0,0,8,0" IsEnabled="False"/>
+            <Button Content="Close" Click="OnCloseClick" Style="{StaticResource FlatButton}"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -53,6 +53,26 @@ When a view is loaded, its existing camera and built-in view-item assignments (C
 
 The created view works like any standard XProtect view. Assign cameras to empty slots in the normal Smart Client view builder.
 
+## Saving an Arrangement as a Layout
+
+A **view** is a single saved screen with cameras in it. A **layout** is a reusable template - one of the shapes offered in Smart Client setup mode under **Add View**, next to the built-in 1x1 and 2x2 grids.
+
+Click **Save as Layout** to store the current arrangement as one of those templates.
+
+!!! warning "A layout stores the arrangement only"
+    Layouts carry geometry and nothing else. Cameras and other view item content are not part of a layout, so a view created from one starts empty. If you want to keep the cameras, save a view instead.
+
+The dialog asks for a name, an optional description, and which layout group to file it under, and previews exactly what will be stored. The panes are written at full precision - the arrangement you drew is the arrangement the template produces.
+
+## Managing Layouts
+
+Click **Manage Layouts** to list every layout defined on the site and delete the ones you no longer want. The list shows the owning group, pane count, last-modified date, and description.
+
+!!! danger "Deleting a layout affects everyone"
+    Layouts are shared server configuration, not personal settings. Deleting one removes it from **Add View** for every operator on the site, and it cannot be undone. Views already built from that layout keep working, because each view holds its own copy of the arrangement.
+
+Both buttons write to the management server and need configuration rights that a standard operator account usually does not have. If either fails, the message names the reason and the full detail is written to `MIPLog.txt` with the `[FlexViewLayout]` prefix.
+
 ## Controls
 
 | Action | How |
@@ -65,4 +85,6 @@ The created view works like any standard XProtect view. Assign cameras to empty 
 | **Open view** | Click **Open View**, confirm the recreate notice, pick a view (use the search field to filter) |
 | **Save** | Save the current view - recreates an existing view with cameras restored |
 | **Save As** | Duplicate an opened view to a new name/folder, carrying camera assignments |
+| **Save as Layout** | Store the arrangement as a reusable template in **Add View**. Panes only, no cameras |
+| **Manage Layouts** | List the site's layouts and delete them. Deletion is site-wide |
 </div>

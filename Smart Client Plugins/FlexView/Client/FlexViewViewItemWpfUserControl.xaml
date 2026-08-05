@@ -95,6 +95,18 @@
                             Click="OnSaveClick" Margin="0,0,4,0"/>
                     <Button x:Name="saveAsButton" Content="&#x1F4DD; Save As" Style="{StaticResource AccentButton}"
                             Click="OnSaveAsClick" Visibility="Collapsed"/>
+
+                    <!-- Layout tools. Separated from the view buttons because they write shared
+                         server configuration rather than a view in a folder. -->
+                    <Border Width="1" Background="#FF30363D" Margin="8,4,8,4"/>
+                    <Button x:Name="saveLayoutButton" Content="&#x1F4D0; Save as Layout"
+                            Style="{StaticResource ToolButton}"
+                            Click="OnSaveAsLayoutClick" Margin="0,0,4,0"
+                            ToolTip="Store this arrangement as a reusable layout in Add View. Panes only, no cameras."/>
+                    <Button x:Name="manageLayoutsButton" Content="&#x2699; Manage Layouts"
+                            Style="{StaticResource ToolButton}"
+                            Click="OnManageLayoutsClick"
+                            ToolTip="List and delete the layouts defined on this site."/>
                 </StackPanel>
                 <TextBlock x:Name="viewNameLabel" Foreground="#FF58A6FF" FontSize="12"
                            VerticalAlignment="Center" HorizontalAlignment="Left" FontWeight="SemiBold"/>

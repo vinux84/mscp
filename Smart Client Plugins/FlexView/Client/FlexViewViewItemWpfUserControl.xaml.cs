@@ -819,8 +819,15 @@ namespace FlexView.Client
 
         private void ShowSavedStatus(string viewName)
         {
+            FlashStatus($"Saved \"{viewName}\"");
+        }
+
+        // Green confirmation in the status corner that reverts to the normal pane/grid readout
+        // after three seconds.
+        private void FlashStatus(string message)
+        {
             var original = statusText.Foreground;
-            statusText.Text = $"Saved \"{viewName}\"";
+            statusText.Text = message;
             statusText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
 
             var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
@@ -1670,6 +1677,158 @@ namespace FlexView.Client
             _isDirty = false;
             viewNameLabel.Text = newView.Name;
             UpdateStatus();
+        }
+
+        #endregion
+
+        #region Layouts
+
+        // Stores the current arrangement as a layout: a reusable template in Smart Client's Add View
+        // picker, alongside the built-in 1x1 / 2x2 grids.
+        //
+        // A layout is geometry and nothing else - the SDK's Layout type carries only Id, Name,
+        // Description and DefinitionXml, with no way to attach cameras. Views created from this
+        // layout therefore start empty. SaveLayoutWindow states that on the dialog, and the button
+        // is worded "Save as Layout" rather than "Save View as Layout" for the same reason.
+        //
+        // The rectangles come from ConvertPanesToSdkLayout, the same method the view save path uses,
+        // and land in the definition XML unscaled: both sides are the 0..1000 coordinate space, so
+        // what the operator drew is stored exactly.
+        private async void OnSaveAsLayoutClick(object sender, RoutedEventArgs e)
+        {
+            if (_panes.Count == 0)
+            {
+                MessageDialog.ShowError("Cannot Save Layout",
+                    "Create at least one pane before saving a layout.", Window.GetWindow(this));
+                return;
+            }
+
+            // Panes cannot overlap by construction - every create, move and resize is rejected on
+            // overlap. Checked anyway because an overlapping layout would be accepted by the server
+            // and only misbehave later, in the picker, far from here.
+            var overlapping = _panes.Where(HasOverlap).ToList();
+            if (overlapping.Count > 0)
+            {
+                FlexViewDefinition.Log.Error(
+                    $"[FlexViewLayout] Save as Layout refused: {overlapping.Count} overlapping pane(s) - "
+                    + string.Join(", ", overlapping.Select(p => $"#{p.Id}({p.Col},{p.Row},{p.ColSpan}x{p.RowSpan})")));
+                MessageDialog.ShowError("Cannot Save Layout",
+                    "Some panes overlap. Separate them before saving as a layout.", Window.GetWindow(this));
+                return;
+            }
+
+            var rects = ConvertPanesToSdkLayout();
+            FlexViewDefinition.Log.Info(
+                $"[FlexViewLayout] Save as Layout: {rects.Length} pane(s) - "
+                + string.Join(" ", rects.Select(r => $"({r.X},{r.Y},{r.Width}x{r.Height})")));
+
+            List<LayoutRepository.LayoutGroupInfo> groups;
+            SetLayoutButtonsEnabled(false);
+            try
+            {
+                groups = await Task.Run(() => LayoutRepository.LoadGroups());
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Error($"[FlexViewLayout] Save as Layout: loading groups failed - {ex.GetType().Name}: {ex.Message}", ex);
+                MessageDialog.ShowError("Cannot Save Layout",
+                    $"The layout groups could not be read from the management server:\n\n{ex.Message}\n\n"
+                    + "Saving a layout needs configuration rights that a standard operator account usually does not have. "
+                    + "See MIPLog for details.",
+                    Window.GetWindow(this));
+                return;
+            }
+            finally
+            {
+                SetLayoutButtonsEnabled(true);
+            }
+
+            var defaultName = _isEditMode && _editingView != null && !string.IsNullOrWhiteSpace(_editingView.Name)
+                ? _editingView.Name
+                : $"FlexView {_panes.Count} pane{(_panes.Count != 1 ? "s" : "")}";
+
+            var dlg = new SaveLayoutWindow(defaultName, groups, rects) { Owner = Application.Current.MainWindow };
+            if (dlg.ShowDialog() != true)
+            {
+                FlexViewDefinition.Log.Info("[FlexViewLayout] Save as Layout cancelled by the operator.");
+                return;
+            }
+
+            var group = dlg.SelectedGroup;
+            var name = dlg.LayoutName;
+
+            // Rendered here, on the UI thread: RenderTargetBitmap needs a Dispatcher, so it cannot
+            // move into the Task.Run below.
+            var icon = LayoutIconRenderer.RenderBase64(rects);
+
+            string definitionXml;
+            try
+            {
+                definitionXml = LayoutRepository.BuildDefinitionXml(rects, icon);
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Error($"[FlexViewLayout] Save as Layout: building definition xml failed - {ex.GetType().Name}: {ex.Message}", ex);
+                MessageDialog.ShowError("Cannot Save Layout",
+                    $"The layout definition could not be built:\n\n{ex.Message}", Window.GetWindow(this));
+                return;
+            }
+
+            SetLayoutButtonsEnabled(false);
+            statusText.Text = $"Saving layout \"{name}\"...";
+            try
+            {
+                // AddLayout's description is required by the SDK signature but nothing in the
+                // picker surfaces it, so it is not worth a field on the dialog.
+                await Task.Run(() => LayoutRepository.AddLayout(group, name, "", definitionXml));
+
+                // Without this the layout is on the server but absent from Add View until the
+                // operator reloads the client by hand, which reads as the save having failed.
+                LayoutRepository.RequestClientConfigurationReload();
+
+                FlashStatus($"Saved layout \"{name}\"");
+                MessageDialog.ShowSuccess("Layout Saved",
+                    $"\"{name}\" was added to the \"{group.Name}\" group.\n\n"
+                    + "It is now available in Smart Client setup mode under Add View. Views created from it "
+                    + "start empty - the arrangement is stored, the cameras are not.",
+                    Window.GetWindow(this));
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Error($"[FlexViewLayout] Save as Layout: AddLayout failed - {ex.GetType().Name}: {ex.Message}", ex);
+                UpdateStatus();
+                MessageDialog.ShowError("Save Layout Failed",
+                    $"\"{name}\" could not be saved:\n\n{ex.Message}\n\nSee MIPLog for the full detail.",
+                    Window.GetWindow(this));
+            }
+            finally
+            {
+                SetLayoutButtonsEnabled(true);
+            }
+        }
+
+        private void OnManageLayoutsClick(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                FlexViewDefinition.Log.Info("[FlexViewLayout] Manage Layouts opened.");
+                var dlg = new ManageLayoutsWindow { Owner = Application.Current.MainWindow };
+                dlg.ShowDialog();
+                FlexViewDefinition.Log.Info("[FlexViewLayout] Manage Layouts closed.");
+            }
+            catch (Exception ex)
+            {
+                FlexViewDefinition.Log.Error($"[FlexViewLayout] Manage Layouts failed to open - {ex.GetType().Name}: {ex.Message}", ex);
+                MessageDialog.ShowError("Manage Layouts Failed",
+                    $"The layout manager could not be opened:\n\n{ex.Message}\n\nSee MIPLog for details.",
+                    Window.GetWindow(this));
+            }
+        }
+
+        private void SetLayoutButtonsEnabled(bool enabled)
+        {
+            saveLayoutButton.IsEnabled = enabled;
+            manageLayoutsButton.IsEnabled = enabled;
         }
 
         #endregion
