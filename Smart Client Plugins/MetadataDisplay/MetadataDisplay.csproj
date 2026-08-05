@@ -21,7 +21,9 @@
          2.0.0.0 with API drift between rcs - without internalization, two plugins
          each carrying a different rc collide in Smart Client's AppDomain and the
          second one to need a type hits TypeLoadException. SkiaSharp/HarfBuzz stay
-         external (large + native libSkiaSharp.dll / libHarfBuzzSharp.dll). -->
+         external (large + native libSkiaSharp.dll / libHarfBuzzSharp.dll).
+         Version held at rc5.4 deliberately: 2.0.x stable has API drift we have not
+         validated against the LineChart render type. Dependabot ignores it. -->
     <PackageReference Include="LiveChartsCore.SkiaSharpView.WPF" Version="2.0.0-rc5.4" />
   </ItemGroup>
 
