@@ -748,13 +748,49 @@ namespace ColoredTimeline.Admin
                         finally { _lvEvents.EndUpdate(); }
                     });
                 }
-                catch (Exception ex)
-                {
+                catch (Exception ex){
                     var msg = (ex is AggregateException ag)
                         ? string.Join("; ", ag.Flatten().InnerExceptions.Select(e => e.Message))
                         : ex.Message;
+
                     _log.Error($"RefreshEventsTable failed: {msg}");
                     ShowEventsError("EventLog query failed: " + msg);
+
+                    _log.Error("===== FULL EXCEPTION =====");
+                    _log.Error(ex.ToString());
+
+                    if (ex is AggregateException aggregate)
+                    {
+                        foreach (var aggregateInner in aggregate.Flatten().InnerExceptions)
+                        {
+                            _log.Error(
+                                $"===== AGGREGATE INNER =====\r\n" +
+                                $"Type: {aggregateInner.GetType().FullName}\r\n" +
+                                $"Message: {aggregateInner.Message}\r\n" +
+                                $"{aggregateInner.StackTrace}");
+                        }
+                    }
+
+                    var inner = ex.InnerException;
+                    var level = 1;
+
+                    while (inner != null)
+                    {
+                        _log.Error(
+                            $"===== INNER {level} =====\r\n" +
+                            $"Type: {inner.GetType().FullName}\r\n" +
+                            $"Message: {inner.Message}\r\n" +
+                            $"{inner.StackTrace}");
+
+                        inner = inner.InnerException;
+                        level++;
+                    }
+
+                    MessageBox.Show(
+                        ex.ToString(),
+                        "Colored Timeline - AlarmClient Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
                 }
             }, ct);
         }
