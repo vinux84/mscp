@@ -690,7 +690,7 @@ namespace ColoredTimeline.Admin
                     };
 
                     if (ct.IsCancellationRequested) return;
-                    var rows = alarmClient.GetEventLines(0, int.MaxValue, filter) ?? Array.Empty<EventLine>();
+                    var rows = alarmClient.GetEventLines(0, 500, filter) ?? Array.Empty<EventLine>();
                     if (ct.IsCancellationRequested) return;
 
                     // Optional client-side filter for "Show only events from selected cameras".
