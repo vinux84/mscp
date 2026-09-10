@@ -92,8 +92,8 @@ namespace ColoredTimeline.Background
                         ? Task.Run(() => _alarmClient.GetEventLines(0, int.MaxValue, stopFilter), _cts.Token)
                         : Task.FromResult(Array.Empty<EventLine>());
                     Task.WaitAll(new Task[] { startTask, stopTask }, _cts.Token);
-                    startEvents = startTask.Result;
-                    stopEvents = stopTask.Result;
+                    startEvents = OnlyCamera(startTask.Result, CameraFqid.ObjectId);
+                    stopEvents = OnlyCamera(stopTask.Result, CameraFqid.ObjectId);
                 }
                 catch (OperationCanceledException) { return; }
                 catch (ObjectDisposedException) { return; }
@@ -218,6 +218,15 @@ namespace ColoredTimeline.Background
             }
             return sequences;
         }
+
+
+        // On this server version GetEventLines does not honour the Target.CameraId filter
+        // condition - it returns events for every camera, not just this one (confirmed by
+        // comparing the returned row count against a direct Event Log DB query). Filter
+        // client-side so the result is correct regardless.
+        private static EventLine[] OnlyCamera(EventLine[] events, Guid cameraId) =>
+        (events ?? Array.Empty<EventLine>()).Where(e => e.CameraId == cameraId).ToArray();
+
 
         private void EnsureAlarmClient()
         {

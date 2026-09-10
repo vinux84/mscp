@@ -124,8 +124,9 @@ namespace ColoredTimeline.Background
                 EventLine[] events;
                 try
                 {
-                    events = _alarmClient.GetEventLines(0, int.MaxValue, BuildFilter(interval))
-                             ?? Array.Empty<EventLine>();
+                    events = OnlyCamera(_alarmClient.GetEventLines(0, int.MaxValue, BuildFilter(interval)), CameraFqid.ObjectId)
+                    .OrderBy(e => e.Timestamp)
+                    .ToArray();
                 }
                 catch (OperationCanceledException) { return; }
                 catch (ObjectDisposedException) { return; }
@@ -150,10 +151,19 @@ namespace ColoredTimeline.Background
                 _log.Info($"Marker '{Title}' cam={CameraFqid.ObjectId} window=" +
                           $"{interval.StartTime.ToLocalTime():HH:mm:ss}..{interval.EndTime.ToLocalTime():HH:mm:ss} -> {events.Length} marker(s)");
 
+                // Smart Client's marker publish requires strictly increasing timestamps.
+                // At high event rates the Event Log has duplicate (second-precision)
+                // timestamps, which fail with "Argument not sorted" and drop the whole
+                // batch. Sort, then nudge any duplicate forward by one tick.
                 var areas = new List<TimelineDataArea>(events.Length);
+                DateTime lastTs = DateTime.MinValue;
                 foreach (var e in events)
                 {
-                    var area = new TimelineDataArea(new TimeInterval(e.Timestamp, e.Timestamp));
+                    var ts = e.Timestamp;
+                    if (ts <= lastTs) ts = lastTs.AddTicks(1);
+                    lastTs = ts;
+
+                    var area = new TimelineDataArea(new TimeInterval(ts, ts));
                     var info = new MarkerInfo
                     {
                         RuleName = RuleName,
@@ -195,6 +205,10 @@ namespace ColoredTimeline.Background
                 _log.Error($"Marker QueryAndPublish failed for '{Title}': {ex.Message}");
             }
         }
+
+        private static EventLine[] OnlyCamera(EventLine[] events, Guid cameraId) =>
+        (events ?? Array.Empty<EventLine>()).Where(e => e.CameraId == cameraId).ToArray();
+
 
         private void EnsureAlarmClient()
         {
