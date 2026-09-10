@@ -690,7 +690,8 @@ namespace ColoredTimeline.Admin
                     };
 
                     if (ct.IsCancellationRequested) return;
-                    var rows = alarmClient.GetEventLines(0, int.MaxValue, filter) ?? Array.Empty<EventLine>();
+                    const int MaxRows = 500;
+                    var rows = alarmClient.GetEventLines(0, MaxRows, filter) ?? Array.Empty<EventLine>();
                     if (ct.IsCancellationRequested) return;
 
                     // Optional client-side filter for "Show only events from selected cameras".
@@ -701,7 +702,6 @@ namespace ColoredTimeline.Admin
 
                     // No dedup - one row per EventLog entry. Cap at MaxRows newest-first so the
                     // grid stays responsive on busy systems.
-                    const int MaxRows = 500;
                     var ordered = rows
                         .Where(r => !string.IsNullOrEmpty(r.Message))
                         .Where(r => selectedSet == null || selectedSet.Contains(r.CameraId))
