@@ -26,6 +26,7 @@ namespace ColoredTimeline.Background
         public string StopEvent { get; }
         public bool AutoCloseEnabled { get; }
         public TimeSpan AutoCloseAfter { get; }
+        public string TagFilter { get; }
 
         public override Guid Id { get; }
         public override string Title { get; }
@@ -43,6 +44,30 @@ namespace ColoredTimeline.Background
             AutoCloseAfter = rule.AutoCloseAfter;
             RibbonContentColorBrush = new System.Windows.Media.SolidColorBrush(
                 System.Windows.Media.Color.FromArgb(rule.Color.A, rule.Color.R, rule.Color.G, rule.Color.B));
+            RibbonContentColorBrush.Freeze();
+        }
+
+        // AI class detections have no Stop event to pair against, so a class ribbon always
+        // behaves like an unmatched Start under AutoClose: each tagged detection paints a
+        // segment starting at its timestamp and capped at ClassRibbonSeconds later. Reusing
+        // the existing AutoClose/PairStartStop machinery below means no new pairing logic.
+        internal ColoredTimelineSequenceSource(FQID cameraFqid,
+            ColoredTimelineSmartClientBackgroundPlugin.RuleConfig rule,
+            ColoredTimelineSmartClientBackgroundPlugin.ClassMapping cls)
+        {
+            Id = Guid.NewGuid();
+            Title = (rule.Name ?? "Rule") + " " + cls.Name + " Ribbon";
+            CameraFqid = cameraFqid;
+            StartEvent = rule.ClassEvent ?? "";
+            StopEvent = "";
+            AutoCloseEnabled = true;
+            AutoCloseAfter = rule.ClassRibbonSeconds;
+            TagFilter = cls.Name;
+            System.Drawing.Color color;
+            try { color = System.Drawing.ColorTranslator.FromHtml(cls.RibbonColorHex); }
+            catch { color = System.Drawing.Color.DodgerBlue; }
+            RibbonContentColorBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(color.A, color.R, color.G, color.B));
             RibbonContentColorBrush.Freeze();
         }
 
@@ -94,6 +119,8 @@ namespace ColoredTimeline.Background
                     Task.WaitAll(new Task[] { startTask, stopTask }, _cts.Token);
                     startEvents = OnlyCamera(startTask.Result, CameraFqid.ObjectId);
                     stopEvents = OnlyCamera(stopTask.Result, CameraFqid.ObjectId);
+                    if (!string.IsNullOrEmpty(TagFilter))
+                        startEvents = startEvents.Where(e => HasTag(e.CustomTag, TagFilter)).ToArray();
                 }
                 catch (OperationCanceledException) { return; }
                 catch (ObjectDisposedException) { return; }
@@ -225,7 +252,16 @@ namespace ColoredTimeline.Background
         // comparing the returned row count against a direct Event Log DB query). Filter
         // client-side so the result is correct regardless.
         private static EventLine[] OnlyCamera(EventLine[] events, Guid cameraId) =>
-        (events ?? Array.Empty<EventLine>()).Where(e => e.CameraId == cameraId).ToArray();
+            (events ?? Array.Empty<EventLine>()).Where(e => e.CameraId == cameraId).ToArray();
+
+        // Duplicated from ColoredTimelineMarkerSource.HasTag - must stay in sync. CustomTag is
+        // comma-joined when Lumeo tags multiple object classes on one event.
+        private static bool HasTag(string customTag, string className)
+        {
+            if (string.IsNullOrEmpty(customTag) || string.IsNullOrEmpty(className)) return false;
+            return customTag.Split(',').Select(t => t.Trim())
+                .Any(t => string.Equals(t, className, StringComparison.OrdinalIgnoreCase));
+        }
 
 
         private void EnsureAlarmClient()

@@ -33,11 +33,16 @@ namespace ColoredTimeline.Background
 
         public FQID CameraFqid { get; }
         public string EventName { get; }       // raw EventLog message
+        public string TagFilter { get; }
         public MarkerKind Kind { get; }
         public string RuleName { get; }
         public string CameraName { get; }
         public string EventDisplayName { get; }
         public System.Windows.Media.Color AccentColor { get; }
+
+        // Rendered larger than MarkerIconSource (which is sized for the thin ribbon track) -
+        // used only in the hover popup where there's room to show it clearly.
+        private readonly System.Windows.Media.Imaging.BitmapSource _popupIcon;
 
         public override Guid Id { get; }
         public override string Title { get; }
@@ -70,8 +75,45 @@ namespace ColoredTimeline.Background
 
             try
             {
-                MarkerIconSource = MarkerIconRenderer.Render(icon, AccentColor, 16);
+                MarkerIconSource = MarkerIconRenderer.Render(icon, AccentColor, 48);
+                _popupIcon = MarkerIconRenderer.Render(icon, AccentColor, 64);
                 _log.Info($"Created marker source '{Title}' icon={icon} color=#{AccentColor.R:X2}{AccentColor.G:X2}{AccentColor.B:X2} event='{EventName}' cam={cameraFqid.ObjectId}");
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"Failed to render marker icon for '{Title}': {ex.GetType().FullName}: {ex.Message}");
+                throw;
+            }
+        }
+
+        // AI class detections: no Start/Stop event, matches any event whose CustomTag
+        // contains this class (comma-split, e.g. "Car, Truck" matches both).
+        internal ColoredTimelineMarkerSource(FQID cameraFqid, string cameraName,
+            ColoredTimelineSmartClientBackgroundPlugin.RuleConfig rule,
+            ColoredTimelineSmartClientBackgroundPlugin.ClassMapping cls)
+        {
+            Id = Guid.NewGuid();
+            Title = (rule.Name ?? "Rule") + " " + cls.Name;
+            CameraFqid = cameraFqid;
+            CameraName = cameraName ?? "";
+            RuleName = rule.Name ?? "";
+            Kind = MarkerKind.Start; // unused for filtering in class mode
+            EventName = rule.ClassEvent ?? "";
+            TagFilter = cls.Name;
+            EventDisplayName = cls.Name;
+
+            EFontAwesomeIcon icon;
+            if (!MarkerIconRenderer.TryParseIcon(cls.Icon, out icon))
+                icon = EFontAwesomeIcon.Solid_Bell;
+
+            AccentColor = MarkerIconRenderer.ParseColor(cls.ColorHex,
+                System.Windows.Media.Color.FromRgb(0x1E, 0x88, 0xE5));
+
+            try
+            {
+                MarkerIconSource = MarkerIconRenderer.Render(icon, AccentColor, 48);
+                _popupIcon = MarkerIconRenderer.Render(icon, AccentColor, 64);
+                _log.Info($"Created class marker source '{Title}' icon={icon} color=#{AccentColor.R:X2}{AccentColor.G:X2}{AccentColor.B:X2} tag='{TagFilter}' cam={cameraFqid.ObjectId}");
             }
             catch (Exception ex)
             {
@@ -82,7 +124,7 @@ namespace ColoredTimeline.Background
 
         public override void StartGetSequences(IEnumerable<TimeInterval> intervals)
         {
-            if (string.IsNullOrEmpty(EventName)) return;
+            if (string.IsNullOrEmpty(EventName) && string.IsNullOrEmpty(TagFilter)) return;
 
             foreach (var interval in intervals)
             {
@@ -108,7 +150,8 @@ namespace ColoredTimeline.Background
                 EventDisplayName = EventDisplayName,
                 CameraName = CameraName,
                 Timestamp = DateTime.UtcNow,
-                AccentColor = AccentColor
+                AccentColor = AccentColor,
+                PopupIcon = _popupIcon
             });
         }
 
@@ -124,9 +167,10 @@ namespace ColoredTimeline.Background
                 EventLine[] events;
                 try
                 {
-                    events = OnlyCamera(_alarmClient.GetEventLines(0, int.MaxValue, BuildFilter(interval)), CameraFqid.ObjectId)
-                    .OrderBy(e => e.Timestamp)
-                    .ToArray();
+                    events = OnlyCamera(_alarmClient.GetEventLines(0, int.MaxValue, BuildFilter(interval)), CameraFqid.ObjectId);
+                    if (!string.IsNullOrEmpty(TagFilter))
+                        events = events.Where(e => HasTag(e.CustomTag, TagFilter)).ToArray();
+                    events = events.OrderBy(e => e.Timestamp).ToArray();
                 }
                 catch (OperationCanceledException) { return; }
                 catch (ObjectDisposedException) { return; }
@@ -159,6 +203,7 @@ namespace ColoredTimeline.Background
                 DateTime lastTs = DateTime.MinValue;
                 foreach (var e in events)
                 {
+                    _log.Info($" EVENT [{e.Timestamp.ToLocalTime():HH:mm:ss.fff}] msg='{e.Message}' tag='{e.CustomTag}'");
                     var ts = e.Timestamp;
                     if (ts <= lastTs) ts = lastTs.AddTicks(1);
                     lastTs = ts;
@@ -172,7 +217,8 @@ namespace ColoredTimeline.Background
                         EventDisplayName = EventDisplayName,
                         CameraName = CameraName,
                         Timestamp = e.Timestamp,
-                        AccentColor = AccentColor
+                        AccentColor = AccentColor,
+                        PopupIcon = _popupIcon
                     };
 
                     // TimelineDataArea.Id is null on this SDK build, which would throw
@@ -210,6 +256,17 @@ namespace ColoredTimeline.Background
         (events ?? Array.Empty<EventLine>()).Where(e => e.CameraId == cameraId).ToArray();
 
 
+        // CustomTag can hold multiple comma-joined labels (e.g. "Car, Truck") when several
+        // objects were detected in one event - match if any of them equals this class.
+        private static bool HasTag(string customTag, string className)
+        {
+            if (string.IsNullOrEmpty(customTag)) return false;
+            foreach (var part in customTag.Split(','))
+                if (part.Trim().Equals(className, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+
         private void EnsureAlarmClient()
         {
             lock (_lock)
@@ -229,15 +286,20 @@ namespace ColoredTimeline.Background
 
         private EventFilter BuildFilter(TimeInterval interval)
         {
+            var conditions = new List<Condition>
+            {
+                new Condition { Target = Target.CameraId,  Operator = Operator.Equals,      Value = CameraFqid.ObjectId },
+                new Condition { Target = Target.Timestamp, Operator = Operator.GreaterThan, Value = interval.StartTime },
+                new Condition { Target = Target.Timestamp, Operator = Operator.LessThan,    Value = interval.EndTime }
+            };
+            // Class mode has no single event name to filter on - every tagged event for this
+            // camera comes back and gets matched against TagFilter client-side instead.
+            if (!string.IsNullOrEmpty(EventName))
+                conditions.Add(new Condition { Target = Target.Message, Operator = Operator.Equals, Value = EventName });
+
             return new EventFilter
             {
-                Conditions = new[]
-                {
-                    new Condition { Target = Target.CameraId,  Operator = Operator.Equals,      Value = CameraFqid.ObjectId },
-                    new Condition { Target = Target.Message,   Operator = Operator.Equals,      Value = EventName },
-                    new Condition { Target = Target.Timestamp, Operator = Operator.GreaterThan, Value = interval.StartTime },
-                    new Condition { Target = Target.Timestamp, Operator = Operator.LessThan,    Value = interval.EndTime }
-                },
+                Conditions = conditions.ToArray(),
                 Orders = new[]
                 {
                     new OrderBy { Target = Target.Timestamp, Order = Order.Ascending }

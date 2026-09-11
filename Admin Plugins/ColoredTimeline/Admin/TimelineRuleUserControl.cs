@@ -25,6 +25,7 @@ namespace ColoredTimeline.Admin
         private TextBox _txtName;
         private CheckBox _chkEnabled;
         private CheckBox _chkMarkerOnly;
+        private CheckBox _chkAiClasses;
 
         private Label _lblColor;
         private Panel _colorSwatch;
@@ -34,6 +35,28 @@ namespace ColoredTimeline.Admin
         private ListBox _lstCameras;
         private Button _btnAddCamera;
         private Button _btnRemoveCamera;
+        private Button _btnAddAllCameras;
+        private Button _btnRemoveAllCameras;
+
+        private GroupBox _grpClasses;
+        private static readonly string[] ClassNames = { "Person", "Car", "Truck", "Tractor", "Van" };
+        private CheckBox[] _chkClass;
+        private PictureBox[] _icoClassGlyph;
+        private Button[] _btnClassIcon;
+        private Panel[] _swatchClassColor;
+        private Button[] _btnClassColor;
+        private CheckBox[] _chkClassRibbon;
+        private Panel[] _swatchClassRibbonColor;
+        private Button[] _btnClassRibbonColor;
+        private static readonly string[] DefaultClassIcon = { "Solid_Walking", "Solid_CarSide", "Solid_Truck", "Solid_Tractor", "Solid_ShuttleVan" };
+        private readonly string[] _classIcon = (string[])DefaultClassIcon.Clone();
+        private readonly string[] _classColorHex = { DefaultColor, DefaultColor, DefaultColor, DefaultColor, DefaultColor };
+        private readonly string[] _classRibbonColorHex = { DefaultColor, DefaultColor, DefaultColor, DefaultColor, DefaultColor };
+        private Label _txtClassEvent;
+        private Button _btnPickClassEvent;
+        private Button _btnClearClassEvent;
+        private NumericUpDown _numClassRibbonSeconds;
+        private Label _lblClassRibbonSuffix;
 
         private GroupBox _grpStart;
         private Label _txtStart;
@@ -91,15 +114,22 @@ namespace ColoredTimeline.Admin
             _colorSwatch.Click += OnPickColor;
             _btnAddCamera.Click += OnAddCamera;
             _btnRemoveCamera.Click += OnRemoveCamera;
+            _btnAddAllCameras.Click += OnAddAllCameras;
+            _btnRemoveAllCameras.Click += OnRemoveAllCameras;
             _btnPickStart.Click += (s, e) => OnPickEvent(_txtStart);
             _btnPickStop.Click += (s, e) => OnPickEvent(_txtStop);
             _btnClearStart.Click += (s, e) => { SetEventField(_txtStart, ""); OnUserChange(s, e); };
             _btnClearStop.Click += (s, e) => { SetEventField(_txtStop, ""); OnUserChange(s, e); };
+            _btnPickClassEvent.Click += (s, e) => OnPickEvent(_txtClassEvent);
+            _btnClearClassEvent.Click += (s, e) => { SetEventField(_txtClassEvent, ""); OnUserChange(s, e); };
+            _txtClassEvent.DoubleClick += (s, e) => OnPickEvent(_txtClassEvent);
             _txtStart.DoubleClick += (s, e) => OnPickEvent(_txtStart);
             _txtStop.DoubleClick += (s, e) => OnPickEvent(_txtStop);
             _lvEvents.MouseDoubleClick += OnEventsTableDoubleClick;
             _btnRefreshEvents.Click += (s, e) => RefreshEventsTable();
             ApplyColorToSwatch();
+            for (int i = 0; i < ClassNames.Length; i++) ApplyClassRowState(i);
+            ApplyAiClassMode();
 
             if (!EventTypeCache.IsLoaded)
                 EventTypeCache.Loaded += OnEventTypesLoaded;
@@ -107,7 +137,7 @@ namespace ColoredTimeline.Admin
             // Initial population once the handle is created (need it for BeginInvoke).
             // Also paint the marker glyph previews from their default values so the boxes
             // aren't empty before the first FillContent/ClearContent call.
-            HandleCreated += (s, e) => { RefreshEventsTable(); RefreshIconPreviews(); };
+            HandleCreated += (s, e) => { RefreshEventsTable(); RefreshIconPreviews(); RefreshClassPreviews(); };
         }
 
         private void OnEventTypesLoaded(object sender, EventArgs e)
@@ -152,7 +182,7 @@ namespace ColoredTimeline.Admin
             // Markers-only mode: only Start/Stop markers are drawn, no ribbon. Hides the
             // ribbon-color section and force-checks both per-event Marker boxes when turned on.
             _chkMarkerOnly = new CheckBox { Text = "Markers only (no ribbon)", Location = new Point(220, 38), AutoSize = true, Checked = false };
-
+            _chkAiClasses = new CheckBox { Text = "AI Class Detections", Location = new Point(420, 38), AutoSize = true, Checked = false };
             _lblColor = new Label { Text = "Ribbon color:", Location = new Point(12, 65), AutoSize = true };
             _colorSwatch = new Panel
             {
@@ -167,7 +197,9 @@ namespace ColoredTimeline.Admin
             _lstCameras = new ListBox { Location = new Point(10, 22), Size = new Size(608, 80) };
             _btnAddCamera = new Button { Text = "Add Camera...", Location = new Point(10, 105), Size = new Size(110, 23) };
             _btnRemoveCamera = new Button { Text = "Remove", Location = new Point(126, 105), Size = new Size(80, 23) };
-            _grpCameras.Controls.AddRange(new Control[] { _lstCameras, _btnAddCamera, _btnRemoveCamera });
+            _btnAddAllCameras = new Button { Text = "Add All Cameras", Location = new Point(212, 105), Size = new Size(120, 23) };
+            _btnRemoveAllCameras = new Button { Text = "Remove All Cameras", Location = new Point(338, 105), Size = new Size(140, 23) };
+            _grpCameras.Controls.AddRange(new Control[] { _lstCameras, _btnAddCamera, _btnRemoveCamera, _btnAddAllCameras, _btnRemoveAllCameras });
 
             // Two-column layout: left column (x=12, w=628 - 50% of the form) holds all
             // rule-config controls stacked vertically (Name, Color, Cameras, Start, Stop,
@@ -295,6 +327,124 @@ namespace ColoredTimeline.Admin
                 ForeColor = SystemColors.ControlDarkDark
             };
             _grpAutoClose.Controls.AddRange(new Control[] { _chkAutoClose, _numAutoCloseSeconds, _lblAutoCloseSuffix });
+
+
+            // Detection classes - per-class icon/color for AI events carrying a CustomTag.
+            // Overlays the Start/Stop/Auto-close area; shown only in "AI Class Detections" mode.
+            _grpClasses = new GroupBox { Text = "Detection classes", Location = new Point(12, 245), Size = new Size(628, 350), Visible = false };
+
+            // The event to watch for tagged detections. Lets
+            // different rules on different cameras key off different events.
+            var lblClassEvent = new Label { Text = "Event:", Location = new Point(12, 26), AutoSize = true };
+            _txtClassEvent = new Label
+            {
+                Location = new Point(12, 46),
+                Size = new Size(450, 22),
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = SystemColors.Window,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, 0, 4, 0),
+                AutoEllipsis = true
+            };
+            _btnPickClassEvent = new Button { Text = "Pick...", Location = new Point(468, 46), Size = new Size(75, 23) };
+            _btnClearClassEvent = new Button { Text = "Clear", Location = new Point(549, 46), Size = new Size(75, 23) };
+            _grpClasses.Controls.AddRange(new Control[] { lblClassEvent, _txtClassEvent, _btnPickClassEvent, _btnClearClassEvent });
+
+            _chkClass = new CheckBox[ClassNames.Length];
+            _icoClassGlyph = new PictureBox[ClassNames.Length];
+            _btnClassIcon = new Button[ClassNames.Length];
+            _swatchClassColor = new Panel[ClassNames.Length];
+            _btnClassColor = new Button[ClassNames.Length];
+            _chkClassRibbon = new CheckBox[ClassNames.Length];
+            _swatchClassRibbonColor = new Panel[ClassNames.Length];
+            _btnClassRibbonColor = new Button[ClassNames.Length];
+            for (int i = 0; i < ClassNames.Length; i++)
+            {
+                int rowY = 90 + i * 34;
+                int idx = i;
+
+                _chkClass[i] = new CheckBox
+                {
+                    Text = ClassNames[i],
+                    Location = new Point(12, rowY),
+                    Size = new Size(90, 24),
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Checked = false
+                };
+                _icoClassGlyph[i] = new PictureBox
+                {
+                    Location = new Point(110, rowY),
+                    Size = new Size(24, 24),
+                    BorderStyle = BorderStyle.FixedSingle,
+                    BackColor = SystemColors.Window,
+                    SizeMode = PictureBoxSizeMode.CenterImage
+                };
+                _btnClassIcon[i] = new Button { Text = "Icon...", Location = new Point(140, rowY), Size = new Size(64, 24) };
+                _swatchClassColor[i] = new Panel
+                {
+                    Location = new Point(212, rowY),
+                    Size = new Size(24, 24),
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Cursor = Cursors.Hand
+                };
+                _btnClassColor[i] = new Button { Text = "Color...", Location = new Point(242, rowY), Size = new Size(64, 24) };
+                _chkClassRibbon[i] = new CheckBox
+                {
+                    Text = "Ribbon",
+                    Location = new Point(326, rowY),
+                    Size = new Size(66, 24),
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Checked = false
+                };
+                _swatchClassRibbonColor[i] = new Panel
+                {
+                    Location = new Point(410, rowY),
+                    Size = new Size(24, 24),
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Cursor = Cursors.Hand
+                };
+                _btnClassRibbonColor[i] = new Button { Text = "Color...", Location = new Point(438, rowY), Size = new Size(64, 24) };
+
+                _chkClass[i].CheckedChanged += (s, e) => { ApplyClassRowState(idx); OnUserChange(s, e); };
+                _btnClassIcon[i].Click += (s, e) => OnPickClassIcon(idx);
+                _icoClassGlyph[i].Click += (s, e) => OnPickClassIcon(idx);
+                _btnClassColor[i].Click += (s, e) => OnPickClassColor(idx);
+                _swatchClassColor[i].Click += (s, e) => OnPickClassColor(idx);
+                _chkClassRibbon[i].CheckedChanged += (s, e) => { ApplyClassRowState(idx); OnUserChange(s, e); };
+                _btnClassRibbonColor[i].Click += (s, e) => OnPickClassRibbonColor(idx);
+                _swatchClassRibbonColor[i].Click += (s, e) => OnPickClassRibbonColor(idx);
+
+                _grpClasses.Controls.AddRange(new Control[]
+{
+                    _chkClass[i], _icoClassGlyph[i], _btnClassIcon[i], _swatchClassColor[i], _btnClassColor[i],
+                    _chkClassRibbon[i], _swatchClassRibbonColor[i], _btnClassRibbonColor[i]
+});
+            }
+
+            // Ribbon duration for class detections - a single tagged event has no Stop to
+            // pair against, so each detection paints a ribbon segment starting at its
+            // timestamp and lasting this many seconds. Shared across all classes in the rule.
+            var lblClassRibbonDuration = new Label { Text = "Ribbon duration:", Location = new Point(12, 262), AutoSize = true };
+            _numClassRibbonSeconds = new NumericUpDown
+            {
+                Location = new Point(140, 259),
+                Size = new Size(70, 22),
+                Minimum = 1,
+                Maximum = 3600,
+                Value = 5
+            };
+            _lblClassRibbonSuffix = new Label
+            {
+                Text = "seconds after each detection",
+                Location = new Point(216, 262),
+                AutoSize = true,
+                ForeColor = SystemColors.ControlDarkDark
+            };
+            _numClassRibbonSeconds.ValueChanged += OnUserChange;
+            _grpClasses.Controls.AddRange(new Control[] { lblClassRibbonDuration, _numClassRibbonSeconds, _lblClassRibbonSuffix });
+
             _chkAutoClose.CheckedChanged += (s, e) =>
             {
                 _numAutoCloseSeconds.Enabled = _chkAutoClose.Checked;
@@ -371,11 +521,11 @@ namespace ColoredTimeline.Admin
 
             Controls.AddRange(new Control[]
             {
-                _lblName, _txtName, _chkEnabled, _chkMarkerOnly,
+                _lblName, _txtName, _chkEnabled, _chkMarkerOnly, _chkAiClasses,
                 _lblColor, _colorSwatch, _btnPickColor,
                 _grpCameras,
                 _grpStart, _grpStop,
-                _grpAutoClose,
+                _grpAutoClose, _grpClasses,
                 _lblEventsTable, _chkOnlySelectedCameras, _btnRefreshEvents, _lvEvents
             });
 
@@ -393,10 +543,25 @@ namespace ColoredTimeline.Admin
                 OnUserChange(s, e);
             };
 
+            _chkAiClasses.CheckedChanged += (s, e) => { ApplyAiClassMode(); OnUserChange(s, e); };
+
             Name = "TimelineRuleUserControl";
             Size = new Size(1280, 605);
             ResumeLayout(false);
             PerformLayout();
+        }
+
+        private void ApplyAiClassMode()
+        {
+            bool ai = _chkAiClasses != null && _chkAiClasses.Checked;
+            // The Detection classes box overlaps Start/Stop/Auto-close, so it's a straight swap.
+            _grpClasses.Visible = ai;
+            _grpStart.Visible = !ai;
+            _grpStop.Visible = !ai;
+            _grpAutoClose.Visible = !ai;
+            // Markers-only is meaningless in AI class mode - every class already gets its own
+            // marker, and ribbon is a separate per-class toggle now.
+            _chkMarkerOnly.Visible = !ai;
         }
 
         private void ApplyMarkerOnlyState()
@@ -478,6 +643,84 @@ namespace ColoredTimeline.Admin
                     OnUserChange(this, EventArgs.Empty);
                 }
             }
+        }
+
+        private void OnPickClassIcon(int i)
+        {
+            EFontAwesomeIcon current;
+            MarkerIconRenderer.TryParseIcon(_classIcon[i], out current);
+            using (var dlg = new IconPickerDialog(current, _classColorHex[i]))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    _classIcon[i] = dlg.SelectedIcon.ToString();
+                    RefreshClassPreviews();
+                    OnUserChange(this, EventArgs.Empty);
+                }
+            }
+        }
+
+        private void OnPickClassColor(int i)
+        {
+            Color start;
+            try { start = ColorTranslator.FromHtml(_classColorHex[i]); }
+            catch { start = ColorTranslator.FromHtml(DefaultColor); }
+
+            using (var dlg = new ColorDialog { AllowFullOpen = true, AnyColor = true, FullOpen = true, Color = start })
+            {
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    _classColorHex[i] = ColorTranslator.ToHtml(dlg.Color);
+                    RefreshClassPreviews();
+                    if (!_filling) OnUserChange(this, EventArgs.Empty);
+                }
+            }
+        }
+
+
+        private void OnPickClassRibbonColor(int i)
+        {
+            Color start;
+            try { start = ColorTranslator.FromHtml(_classRibbonColorHex[i]); }
+            catch { start = ColorTranslator.FromHtml(DefaultColor); }
+
+            using (var dlg = new ColorDialog { AllowFullOpen = true, AnyColor = true, FullOpen = true, Color = start })
+            {
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    _classRibbonColorHex[i] = ColorTranslator.ToHtml(dlg.Color);
+                    RefreshClassPreviews();
+                    if (!_filling) OnUserChange(this, EventArgs.Empty);
+                }
+            }
+        }
+
+        private void RefreshClassPreviews()
+        {
+            if (_icoClassGlyph == null) return;
+            for (int i = 0; i < ClassNames.Length; i++)
+            {
+                _icoClassGlyph[i].Image = string.IsNullOrEmpty(_classIcon[i])
+                    ? null
+                    : RenderIconPreview(_classIcon[i], _classColorHex[i]);
+                try { _swatchClassColor[i].BackColor = ColorTranslator.FromHtml(_classColorHex[i]); }
+                catch { _swatchClassColor[i].BackColor = ColorTranslator.FromHtml(DefaultColor); }
+                try { _swatchClassRibbonColor[i].BackColor = ColorTranslator.FromHtml(_classRibbonColorHex[i]); }
+                catch { _swatchClassRibbonColor[i].BackColor = ColorTranslator.FromHtml(DefaultColor); }
+            }
+        }
+
+        private void ApplyClassRowState(int i)
+        {
+            bool on = _chkClass[i].Checked;
+            _icoClassGlyph[i].Enabled = on;
+            _btnClassIcon[i].Enabled = on;
+            _swatchClassColor[i].Enabled = on;
+            _btnClassColor[i].Enabled = on;
+            _chkClassRibbon[i].Enabled = on;
+            bool ribbonOn = on && _chkClassRibbon[i].Checked;
+            _swatchClassRibbonColor[i].Enabled = ribbonOn;
+            _btnClassRibbonColor[i].Enabled = ribbonOn;
         }
 
         private void OnPickIconColor(bool isStart)
@@ -630,6 +873,60 @@ namespace ColoredTimeline.Admin
             }
         }
 
+        private void OnAddAllCameras(object sender, EventArgs e)
+        {
+            try
+            {
+                _selectedCameras.Clear();
+                _lstCameras.Items.Clear();
+                var all = new List<Item>();
+                CollectCameras(Configuration.Instance.GetItemsByKind(Kind.Camera), all);
+                // Naming convention: a "~" in the camera name means it isn't onboarded in
+                // Lumeo, so it can never produce AI class detections. Only skip those when
+                // building the camera list for an AI Class Detections rule - a regular
+                // Start/Stop rule can still use any camera's events.
+                bool skipNonLumeo = _chkAiClasses.Checked;
+                foreach (var cam in all)
+                {
+                    if (skipNonLumeo && !string.IsNullOrEmpty(cam.Name) && cam.Name.Contains("~")) continue;
+                    var id = cam.FQID.ObjectId;
+                    if (_selectedCameras.Any(c => c.Id == id)) continue;
+                    _selectedCameras.Add((id, cam.Name));
+                    _lstCameras.Items.Add(cam.Name);
+                }
+                OnUserChange(sender, e);
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"Populate all cameras failed: {ex.GetType().FullName}: {ex.Message}");
+                MessageBox.Show("Could not enumerate cameras:\r\n\r\n" + ex.Message,
+                    "Colored Timeline", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void OnRemoveAllCameras(object sender, EventArgs e)
+        {
+            _selectedCameras.Clear();
+            _lstCameras.Items.Clear();
+            OnUserChange(sender, e);
+        }
+
+        // GetItemsByKind returns a folder tree. Only recurse into folder nodes - calling
+        // GetChildren() on every leaf camera is a server round-trip each, which was both
+        // slow and prone to transient failures on large systems.
+        private static void CollectCameras(IEnumerable<Item> items, List<Item> acc)
+        {
+            if (items == null) return;
+            foreach (var it in items)
+            {
+                if (it?.FQID == null) continue;
+                if (it.FQID.FolderType != FolderType.No)
+                    CollectCameras(it.GetChildren(), acc);
+                else if (it.FQID.Kind == Kind.Camera)
+                    acc.Add(it);
+            }
+        }
+
         private void OnRemoveCamera(object sender, EventArgs e)
         {
             var idx = _lstCameras.SelectedIndex;
@@ -741,9 +1038,12 @@ namespace ColoredTimeline.Admin
                                 row.Tag = d.Message;
                                 _lvEvents.Items.Add(row);
                             }
+                            var hint = _chkAiClasses.Checked
+                                ? "double-click to set Event"
+    :                           "double-click to use as Start, Shift+double-click for Stop";
                             _lblEventsTable.Text = totalAfterFilter > MaxRows
-                                ? $"Events from the last 24 h - showing newest {MaxRows} of {totalAfterFilter} (double-click to use as Start, Shift+double-click for Stop):"
-                                : $"Events from the last 24 h - {totalAfterFilter} row(s) (double-click to use as Start, Shift+double-click for Stop):";
+                                ? $"Events from the last 24 h - showing newest {MaxRows} of {totalAfterFilter} ({hint}):"
+                                : $"Events from the last 24 h - {totalAfterFilter} row(s) ({hint}):";
                         }
                         finally { _lvEvents.EndUpdate(); }
                     });
@@ -856,8 +1156,15 @@ namespace ColoredTimeline.Admin
             var item = hit?.Item;
             if (item?.Tag is string fullName && !string.IsNullOrEmpty(fullName))
             {
-                var target = (Control.ModifierKeys & Keys.Shift) == Keys.Shift ? _txtStop : _txtStart;
-                SetEventField(target, fullName);
+                if (_chkAiClasses.Checked)
+                {
+                    SetEventField(_txtClassEvent, fullName);
+                }
+                else
+                {
+                    var target = (Control.ModifierKeys & Keys.Shift) == Keys.Shift ? _txtStop : _txtStart;
+                    SetEventField(target, fullName);
+                }
                 OnUserChange(this, EventArgs.Empty);
             }
         }
@@ -928,7 +1235,34 @@ namespace ColoredTimeline.Admin
                     ? item.Properties["StopIconColor"] : _ribbonColor;
                 _chkMarkerOnly.Checked = item.Properties.ContainsKey("MarkerOnly")
                     && item.Properties["MarkerOnly"] == "Yes";
+                _chkAiClasses.Checked = item.Properties.ContainsKey("AiClassMode")
+                    && item.Properties["AiClassMode"] == "Yes";
+                SetEventField(_txtClassEvent, item.Properties.ContainsKey("ClassEvent") ? item.Properties["ClassEvent"] : "");
+                int classRibbonSeconds = 5;
+                if (item.Properties.ContainsKey("ClassRibbonSeconds"))
+                    int.TryParse(item.Properties["ClassRibbonSeconds"], out classRibbonSeconds);
+                if (classRibbonSeconds < 1) classRibbonSeconds = 1;
+                if (classRibbonSeconds > 3600) classRibbonSeconds = 3600;
+                _numClassRibbonSeconds.Value = classRibbonSeconds;
+                for (int i = 0; i < ClassNames.Length; i++)
+                {
+                    var key = ClassNames[i];
+                    _chkClass[i].Checked = item.Properties.ContainsKey($"Class_{key}_Enabled")
+                        && item.Properties[$"Class_{key}_Enabled"] == "Yes";
+                    _classIcon[i] = item.Properties.ContainsKey($"Class_{key}_Icon") && !string.IsNullOrEmpty(item.Properties[$"Class_{key}_Icon"])
+                        ? item.Properties[$"Class_{key}_Icon"] : DefaultClassIcon[i];
+                    _classColorHex[i] = item.Properties.ContainsKey($"Class_{key}_Color") && !string.IsNullOrEmpty(item.Properties[$"Class_{key}_Color"])
+                        ? item.Properties[$"Class_{key}_Color"] : DefaultColor;
+                    _chkClassRibbon[i].Checked = item.Properties.ContainsKey($"Class_{key}_RibbonEnabled")
+                        && item.Properties[$"Class_{key}_RibbonEnabled"] == "Yes";
+                    _classRibbonColorHex[i] = item.Properties.ContainsKey($"Class_{key}_RibbonColor") && !string.IsNullOrEmpty(item.Properties[$"Class_{key}_RibbonColor"])
+                        ? item.Properties[$"Class_{key}_RibbonColor"] : DefaultColor;
+                    ApplyClassRowState(i);
+                }
+                RefreshClassPreviews();
+
                 ApplyMarkerOnlyState();
+                ApplyAiClassMode();
                 RefreshIconPreviews();
                 ApplyMarkersEnabledState();
             }
@@ -962,7 +1296,21 @@ namespace ColoredTimeline.Admin
                 _startIconColorHex = _ribbonColor;
                 _stopIconColorHex = _ribbonColor;
                 _chkMarkerOnly.Checked = false;
+                _chkAiClasses.Checked = false;
+                SetEventField(_txtClassEvent, "");
+                _numClassRibbonSeconds.Value = 5;
+                for (int i = 0; i < ClassNames.Length; i++)
+                {
+                    _chkClass[i].Checked = false;
+                    _classIcon[i] = DefaultClassIcon[i];
+                    _classColorHex[i] = DefaultColor;
+                    _chkClassRibbon[i].Checked = false;
+                    _classRibbonColorHex[i] = DefaultColor;
+                    ApplyClassRowState(i);
+                }
+                RefreshClassPreviews();
                 ApplyMarkerOnlyState();
+                ApplyAiClassMode();
                 RefreshIconPreviews();
                 ApplyMarkersEnabledState();
             }
@@ -979,13 +1327,28 @@ namespace ColoredTimeline.Admin
                 return "Name is required.";
             if (_selectedCameras.Count == 0)
                 return "At least one camera must be selected.";
-            if (string.IsNullOrWhiteSpace(_txtStart.Tag as string))
-                return "Start event is required.";
-            // Stop is required only when ribbons are drawn AND auto-close is OFF. Marker-only
-            // mode has no ribbon to close, and auto-close itself caps unmatched Starts, so in
-            // either case the Stop event is optional.
-            if (!_chkMarkerOnly.Checked && !_chkAutoClose.Checked && string.IsNullOrWhiteSpace(_txtStop.Tag as string))
-                return "Stop event is required (or enable auto-close / markers-only to allow an empty Stop).";
+
+            if (_chkAiClasses.Checked)
+            {
+                if (string.IsNullOrWhiteSpace(_txtClassEvent.Tag as string))
+                    return "Event is required.";
+                bool anyClassEnabled = false;
+                for (int i = 0; i < ClassNames.Length; i++)
+                    if (_chkClass[i].Checked) anyClassEnabled = true;
+                if (!anyClassEnabled)
+                    return "Enable at least one detection class.";
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(_txtStart.Tag as string))
+                    return "Start event is required.";
+                // Stop is required only when ribbons are drawn AND auto-close is OFF. Marker-only
+                // mode has no ribbon to close, and auto-close itself caps unmatched Starts, so in
+                // either case the Stop event is optional.
+                if (!_chkMarkerOnly.Checked && !_chkAutoClose.Checked && string.IsNullOrWhiteSpace(_txtStop.Tag as string))
+                    return "Stop event is required (or enable auto-close / markers-only to allow an empty Stop).";
+            }
+
             try { ColorTranslator.FromHtml(_ribbonColor); }
             catch { return "Ribbon color is invalid."; }
             return null;
@@ -1012,6 +1375,19 @@ namespace ColoredTimeline.Admin
             item.Properties["StartIconColor"] = _startIconColorHex ?? "";
             item.Properties["StopIconColor"] = _stopIconColorHex ?? "";
             item.Properties["MarkerOnly"] = _chkMarkerOnly.Checked ? "Yes" : "No";
+
+            item.Properties["AiClassMode"] = _chkAiClasses.Checked ? "Yes" : "No";
+            item.Properties["ClassEvent"] = (_txtClassEvent.Tag as string) ?? "";
+            item.Properties["ClassRibbonSeconds"] = ((int)_numClassRibbonSeconds.Value).ToString();
+            for (int i = 0; i < ClassNames.Length; i++)
+            {
+                var key = ClassNames[i];
+                item.Properties[$"Class_{key}_Enabled"] = _chkClass[i].Checked ? "Yes" : "No";
+                item.Properties[$"Class_{key}_Icon"] = _classIcon[i] ?? "";
+                item.Properties[$"Class_{key}_Color"] = _classColorHex[i] ?? "";
+                item.Properties[$"Class_{key}_RibbonEnabled"] = _chkClassRibbon[i].Checked ? "Yes" : "No";
+                item.Properties[$"Class_{key}_RibbonColor"] = _classRibbonColorHex[i] ?? "";
+            }
         }
     }
 }

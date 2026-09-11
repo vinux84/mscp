@@ -32,6 +32,8 @@ namespace ColoredTimeline.Background
             if (!string.IsNullOrEmpty(info.CameraName))
                 stack.Children.Add(MakeRow("Camera:", info.CameraName));
             stack.Children.Add(MakeRow("Time:", info.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.CurrentCulture)));
+            if (info.PopupIcon != null)
+                stack.Children.Add(MakeIcon(info.PopupIcon));
 
             border.Child = stack;
             Content = border;
@@ -90,6 +92,19 @@ namespace ColoredTimeline.Background
             });
             return sp;
         }
+
+        private static UIElement MakeIcon(System.Windows.Media.Imaging.BitmapSource icon)
+        {
+            return new Image
+            {
+                Source = icon,
+                Width = 64,
+                Height = 64,
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+        }
     }
 
     public enum MarkerKind { Start, Stop }
@@ -103,5 +118,6 @@ namespace ColoredTimeline.Background
         public string CameraName;
         public DateTime Timestamp;        // UTC
         public Color AccentColor = Color.FromRgb(0x1E, 0x88, 0xE5);
+        public System.Windows.Media.Imaging.BitmapSource PopupIcon;
     }
 }

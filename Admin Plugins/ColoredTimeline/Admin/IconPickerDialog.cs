@@ -192,6 +192,8 @@ namespace ColoredTimeline.Admin
             EFontAwesomeIcon.Solid_Ambulance,
             EFontAwesomeIcon.Solid_Taxi,
             EFontAwesomeIcon.Solid_Road,
+            EFontAwesomeIcon.Solid_Tractor,
+            EFontAwesomeIcon.Solid_ShuttleVan,
             // Surveillance / vision
             EFontAwesomeIcon.Solid_Eye,
             EFontAwesomeIcon.Solid_EyeSlash,
